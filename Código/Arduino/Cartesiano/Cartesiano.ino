@@ -1,53 +1,110 @@
+// Pines Nema 1
+#define Step 2    
+#define Dir 5     
+#define Enable 8    
 
-// Pines Nema 17 eje Z
-#define Step 27    // Define el Pin de STEP para Motor de eje z
-#define Dir 26    // Define el Pin de DIR  para Motor de eje z
-#define Enable 25    // Define el Pin de ENABLE  para Motor de eje z
+// Pines Nema 2
+#define Step2 3    
+#define Dir2 6    
+#define Enable2 8  
 
-//Pines Nema 17 eje x
-#define Step2 5    // Define el Pin de STEP para Motor de eje x
-#define Dir2 18    // Define el Pin de DIR  para Motor de eje x
-#define Enable2 19    // Define el Pin de ENABLE  para Motor de eje x
+// Pines para los finales de carrera (configuración Pull-Up)
+const int FC1 = 9;  //  Y
+const int FC2 = 10;  //  X
+const int FC3 = 11;  // Z
 
-int retardo = 800;   // Menor numero el giro es mas rapido
-int pasos = 1000;   // 100pasos==1mm
+int retardo = 1000;   // Menor numero = más rápido
+int pasos = 1000;     // 100 pasos ≈ 1 mm
 
 void setup() {
-//Inicializaciòn de motores Nema
-pinMode(Step, OUTPUT); pinMode(Dir, OUTPUT); pinMode(Enable, OUTPUT);
-pinMode(Step2, OUTPUT); pinMode(Dir2, OUTPUT); pinMode(Enable2, OUTPUT);     
-}    
+  pinMode(Step, OUTPUT); pinMode(Dir, OUTPUT); pinMode(Enable, OUTPUT);
+  pinMode(Step2, OUTPUT); pinMode(Dir2, OUTPUT); pinMode(Enable2, OUTPUT);
+
+  pinMode(FC1, INPUT_PULLUP);
+  pinMode(FC2, INPUT_PULLUP);
+  pinMode(FC3, INPUT_PULLUP);
+  home();
+}
 
 void loop() {
-  giro(Step,Dir,Enable,1);
-  giro(Step2,Dir2,Enable2,1);
+  
+
+
+  
+}
+
+void home(){
+  pasos = 10000;
+  giroDual(3);
   delay(1000);
-  giro(Step,Dir,Enable,0);
-  giro(Step2,Dir2,Enable2,0);
+  giroDual(2);
   delay(1000);
+
 }
 
 
-void giro(int paso_,int dire_,int habi_,int dir) {
-  digitalWrite(habi_, LOW);  // Habilita el Driver
-  if( dir==0){ // Bajar eje
-   digitalWrite(dire_, LOW);   // direccion de giro 0
-   for(int i=0;i<pasos;i++){  // da  pasos por un pasos  
-    digitalWrite(paso_, HIGH);      
-    delayMicroseconds(retardo);          
-    digitalWrite(paso_, LOW);       
-    delayMicroseconds(retardo); 
-   }
-  }
-  if( dir==1){ // Subir eje
-  digitalWrite(dire_, HIGH);   // direccion de giro 1
-  for(int i=0;i<pasos;i++){   // da  pasos por un pasos  
-    digitalWrite(paso_, HIGH);      
-    delayMicroseconds(retardo);          
-    digitalWrite(paso_, LOW);       
-    delayMicroseconds(retardo);  
-   }
-  }
-  digitalWrite(habi_, HIGH);   // quita la habilitacion del Driver
+// ---------------------------
+//  FUNCIÓN SIMULTÁNEA
+// ---------------------------
+void giroDual(int direccion) {
+  bool emergencia = false;
 
+  // Habilitar drivers
+  digitalWrite(Enable, LOW);
+  digitalWrite(Enable2, LOW);
+
+  // Configurar direcciones
+  switch(direccion){
+    case 1: // subir
+      digitalWrite(Dir, 1);
+      digitalWrite(Dir2, 1);
+      break;
+    case 2: // bajar
+      digitalWrite(Dir, 0);
+      digitalWrite(Dir2, 0);
+      break;
+    case 3: // izquierda
+      digitalWrite(Dir, 0);
+      digitalWrite(Dir2, 1);
+      break;
+    case 4: // derecha
+      digitalWrite(Dir, 1);
+      digitalWrite(Dir2, 0);
+      break; 
+  }
+
+  // Movimiento simultáneo
+  for (int i = 0; i < pasos; i++) {
+
+    // --- Comprobación de fin de carrera ---
+    if (direccion == 2 && digitalRead(FC1) == LOW) emergencia = true;
+    if (direccion == 3 && digitalRead(FC2) == LOW) emergencia = true;
+
+    if (emergencia) {
+      // Aliviar tensión con 3 pasos cortos
+      for (int j = 0; j < 3; j++) {
+        digitalWrite(Step, HIGH);
+        digitalWrite(Step2, HIGH);
+        delayMicroseconds(100);
+
+        digitalWrite(Step, LOW);
+        digitalWrite(Step2, LOW);
+        delayMicroseconds(100);
+      }
+      break;
+    }
+
+    // --- Paso normal simultáneo ---
+    digitalWrite(Step, HIGH);
+    digitalWrite(Step2, HIGH);
+    delayMicroseconds(retardo);
+
+    digitalWrite(Step, LOW);
+    digitalWrite(Step2, LOW);
+    delayMicroseconds(retardo);
+  }
+
+  // Deshabilitar drivers
+  digitalWrite(Enable, HIGH);
+  digitalWrite(Enable2, HIGH);
 }
