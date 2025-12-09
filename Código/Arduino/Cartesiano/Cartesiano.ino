@@ -18,7 +18,7 @@ const int FC1 = 9;  //  Y
 const int FC2 = 10;  //  X
 const int FC3 = 11;  // Z
 
-int retardo = 1000;   // Menor numero = más rápido
+int retardo = 800;   // Menor numero = más rápido
 int pasos = 1000;     // 100 pasos ≈ 1 mm
 
 void setup() {
@@ -30,7 +30,7 @@ void setup() {
   pinMode(FC3, INPUT_PULLUP);
   home();
   //pasos=1000; //1000pasos=100mm
-  pasos=2000;
+  pasos=1000;
   mover(1);
   delay(1000);
   mover(4);
@@ -38,24 +38,24 @@ void setup() {
 }
 
 void loop() {
-  pasos=6000; ///500 pasos son 50mm
+  pasos=3000; ///500 pasos son 50mm
   mover(1);
-  delay(5000);
+  delay(2500);
 
   mover(4);
-  delay(5000);
+  delay(2500);
 
   mover(2);
-  delay(5000);
+  delay(2500);
 
   mover(3);
-  delay(5000);
+  delay(2500);
 
   
 }
 
 void home(){
-  pasos = 1500;
+  pasos = 500;
   mover(5);
   delay(1000);
   mover(1);
