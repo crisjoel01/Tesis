@@ -1,4 +1,4 @@
-#include <Adafruit_MCP23X17.h>
++#include <Adafruit_MCP23X17.h>
 #define LED_PIN11 0     // MCP23XXX pin LED is attached to
 #define LED_PIN12 8     // MCP23XXX pin LED is attached to
 #define LED_PIN21 0     // MCP23XXX pin LED is attached to
