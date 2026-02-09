@@ -1,43 +1,57 @@
 /* =====================================================
-   SISTEMA 3 SENSORES TCS3200 CON VOTACIÓN (5 muestras)
-
-   Devuelve:
-   0 = vacío
-   1 = rojo
-   2 = verde
-   3 = azul
+   TCS3200 x3 con calibración independiente por estación
+   0 vacío | 1 rojo | 2 verde | 3 azul
    ===================================================== */
 
 #include <Arduino.h>
 
-// =====================================================
-// ESTRUCTURA SENSOR
+int NUM_MUESTRAS =10;
+
 // =====================================================
 struct ColorSensor {
   int s0, s1, s2, s3, out;
 };
 
 // =====================================================
-// PINES DE LAS 3 ESTACIONES
+// PINES
 // =====================================================
 ColorSensor sensores[3] = {
-  {43, 41, 37, 39, 35}, // Estación 1
-  {31, 29, 25, 27, 23}, // Estación 2
-  {52, 50, 46, 48, 44}  // Estación 3
+  {43, 41, 37, 39, 35}, // Est1
+  {31, 29, 25, 27, 23}, // Est2
+  {52, 50, 46, 48, 44}  // Est3
 };
 
-// =====================================================
-// ARREGLO DE STORAGE (50 posiciones)
-// 0 vacío | 1 rojo | 2 verde | 3 azul
-// =====================================================
-byte almacen[50];
-
-int R;
-int V;
-int A;
 
 // =====================================================
-// INIT SENSOR
+// ⭐ PROTOTIPOS POR ESTACIÓN
+// [estacion][color][RGB]
+// color: 0 rojo, 1 verde, 2 azul
+// =====================================================
+const int ref[3][3][3] = {
+
+  // ===== ESTACION 1 =====
+  {
+    {23,39,27}, // rojo
+    {42,26,23}, // verde
+    {49,31,16}  // azul
+  },
+
+  // ===== ESTACION 2 =====
+  {
+    {23,46,23},
+    {62,36,62},
+    {71,41,71}
+  },
+
+  // ===== ESTACION 3 =====
+  {
+    {16,35,29},
+    {40,27,29},
+    {42,28,17}
+  }
+};
+
+
 // =====================================================
 void initSensor(ColorSensor &s)
 {
@@ -53,7 +67,7 @@ void initSensor(ColorSensor &s)
 
 
 // =====================================================
-// LECTURAS RGB
+// LECTURAS
 // =====================================================
 int leerRojo(ColorSensor &s){
   digitalWrite(s.s2, LOW);
@@ -75,86 +89,71 @@ int leerAzul(ColorSensor &s){
 
 
 // =====================================================
-// CLASIFICADOR DE UNA MUESTRA
-// Ajusta umbrales si cambias iluminación
-// =====================================================
-int clasificar(int R, int V, int A)
+int distancia(int r1,int v1,int a1,int r2,int v2,int a2)
 {
-  if (A < V && A < R)
-    return 3; // azul
-
-  else if (R < V && R < A)
-    return 1; // rojo
-
-  else if (V < R && V < A)
-    return 2; // verde
-
-  else
-    return 0; // desconocido
+  int dr=r1-r2;
+  int dv=v1-v2;
+  int da=a1-a2;
+  return dr*dr + dv*dv + da*da;
 }
 
-// =====================================================
-// ⭐ FUNCIÓN PRINCIPAL
-// 5 muestras + voto mayoritario
-// =====================================================
-// =====================================================
-// ⭐ FUNCIÓN PRINCIPAL
-// 5 muestras + promedio + voto mayoritario
-// =====================================================
-int leerColor(ColorSensor &s){
-  int conteo[4] = {0,0,0,0};
 
-  long sumaR = 0;
-  long sumaV = 0;
-  long sumaA = 0;
+// =====================================================
+// ⭐ CLASIFICAR SEGÚN SU PROPIA ESTACIÓN
+// =====================================================
+int clasificar(int estacion, int R, int V, int A)
+{
+  int dRojo  = distancia(R,V,A, ref[estacion][0][0], ref[estacion][0][1], ref[estacion][0][2]);
+  int dVerde = distancia(R,V,A, ref[estacion][1][0], ref[estacion][1][1], ref[estacion][1][2]);
+  int dAzul  = distancia(R,V,A, ref[estacion][2][0], ref[estacion][2][1], ref[estacion][2][2]);
 
-  int R, V, A;
+  int dMin = min(dRojo, min(dVerde, dAzul));
 
-  for(int i=0; i<5; i++)
+  if(dMin == dRojo)  return 1;
+  if(dMin == dVerde) return 2;
+  if(dMin == dAzul)  return 3;
+
+  return 0;
+}
+
+
+// =====================================================
+// ⭐ LECTURA PRINCIPAL
+// =====================================================
+int leerColor(int idx)
+{
+  ColorSensor &s = sensores[idx];
+
+  long sumaR=0, sumaV=0, sumaA=0;
+
+  for(int i=0;i<NUM_MUESTRAS;i++)
   {
-    R = leerRojo(s);
-    delay(40);
+    sumaR += leerRojo(s);
+    delay(12);
 
-    V = leerVerde(s);
-    delay(40);
+    sumaV += leerVerde(s);
+    delay(12);
 
-    A = leerAzul(s);
-
-    sumaR += R;
-    sumaV += V;
-    sumaA += A;
-
-    int color = clasificar(R,V,A);
-    conteo[color]++;
-
-    delay(30);
+    sumaA += leerAzul(s);
+    delay(12);
   }
 
-  // promedio final (más estable)
-  R = sumaR / 5;
-  V = sumaV / 5;
-  A = sumaA / 5;
+  int R = sumaR / NUM_MUESTRAS;
+  int V = sumaV / NUM_MUESTRAS;
+  int A = sumaA / NUM_MUESTRAS;
 
-  Serial.print("R: ");
+  Serial.print("E"); Serial.print(idx+1);
+  Serial.print(" -> R:");
   Serial.print(R);
-  Serial.print("  V: ");
+  Serial.print(" V:");
   Serial.print(V);
-  Serial.print("  A: ");
+  Serial.print(" A:");
   Serial.println(A);
 
-  // mayoría
-  int ganador = 0;
-  for(int i=1;i<4;i++)
-    if(conteo[i] > conteo[ganador])
-      ganador = i;
-
-  return ganador;
+  return clasificar(idx, R, V, A);
 }
 
 
-
-// =====================================================
-// SETUP
 // =====================================================
 void setup()
 {
@@ -163,28 +162,21 @@ void setup()
   for(int i=0;i<3;i++)
     initSensor(sensores[i]);
 
-  Serial.println("Sensores listos");
+  Serial.println("Sistema listo");
 }
 
 
-// =====================================================
-// EJEMPLO DE USO
-// (prueba leer todos)
 // =====================================================
 void loop()
 {
   for(int i=0;i<3;i++)
   {
-    int color = leerColor(sensores[i]);
+    int color = leerColor(i);
 
-    Serial.print("Estacion ");
-    Serial.print(i+1);
-    Serial.print(" -> ");
+    Serial.print("Color detectado: ");
     Serial.println(color);
-
-    delay(500);
   }
 
   Serial.println("------");
-  delay(1500);
+  delay(1200);
 }

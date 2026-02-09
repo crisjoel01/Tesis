@@ -34,12 +34,12 @@ void setup() {
     Serial.println("MCP3 detectado en 0x22");
   }
 
-  if (!mcp4.begin_I2C(0x23)) {
-    Serial.println("Error: MCP4 no detectado en 0x23");
-    while (1);
-  } else {
-    Serial.println("MCP4 detectado en 0x23");
-  }
+  // if (!mcp4.begin_I2C(0x23)) {
+  //   Serial.println("Error: MCP4 no detectado en 0x23");
+  //   while (1);
+  // } else {
+  //   Serial.println("MCP4 detectado en 0x23");
+  // }
 
   // Configura los pines GPA0 y GPB0 como entradas en todos los MCP
   for (int i = 0; i < 4; i++) {
@@ -73,7 +73,7 @@ Adafruit_MCP23X17 &getMCP(int index) {
     case 0: return mcp1;
     case 1: return mcp2;
     case 2: return mcp3;
-    case 3: return mcp4;
+    // case 3: return mcp4;
     default: return mcp1;  // Evita errores si se pasa un índice inválido
   }
 }

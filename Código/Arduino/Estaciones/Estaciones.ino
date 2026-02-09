@@ -62,8 +62,8 @@ void setup() {
   pinMode(FC5, INPUT_PULLUP);
   pinMode(FC6, INPUT_PULLUP);
 
-  servogarra1.attach(44);
-  servogarra2.attach(45);
+  servogarra1.attach(45);
+  servogarra2.attach(44);
   servogarra3.attach(46);
 
   Serial.begin(115200);
@@ -71,7 +71,7 @@ void setup() {
   home_estaciones();
   pasos = 30000;
   digitalWrite(Enable, HIGH);  // Deshabilita el Driver
-  delay(1000);
+  delay(500);
 }
 
 void loop(){
@@ -86,12 +86,12 @@ void loop(){
       case 4: estacion(Step, Dir, FC1, FC4, 0);     respuesta = 1;  break;  //baja estacion 1
       case 5: estacion(Step2, Dir2, FC2, FC5, 0);   respuesta = 1;  break;  //baja estacion 2
       case 6: estacion(Step3, Dir3, FC3, FC6, 0);   respuesta = 1;  break;  //baja estacion 3
-      case 7: servogarra1.write(90);  delay(1000);  respuesta = 1;  break;  //abrir pinza 1
-      case 8: servogarra2.write(90);  delay(1000);  respuesta = 1;  break;  //abrir pinza 2
-      case 9: servogarra3.write(90);  delay(1000);  respuesta = 1;  break;  //abrir pinza 3
-      case 10: servogarra1.write(0);  delay(1000);  respuesta = 1;  break;  //cerrar pinza 1
-      case 11: servogarra2.write(0);  delay(1000);  respuesta = 1;  break;  //cerrar pinza 2
-      case 12: servogarra3.write(0);  delay(1000);  respuesta = 1;  break;  //cerrar pinza 3
+      case 7: delay(500); servogarra1.write(90);  delay(500);  respuesta = 1;  break;  //abrir pinza 1
+      case 8: delay(500); servogarra2.write(90);  delay(500);  respuesta = 1;  break;  //abrir pinza 2
+      case 9: delay(500); servogarra3.write(90);  delay(500);  respuesta = 1;  break;  //abrir pinza 3
+      case 10: delay(500);  servogarra1.write(0);  delay(500);  respuesta = 1;  break;  //cerrar pinza 1
+      case 11: delay(500);  servogarra2.write(0);  delay(500);  respuesta = 1;  break;  //cerrar pinza 2
+      case 12: delay(500);  servogarra3.write(0);  delay(500);  respuesta = 1;  break;  //cerrar pinza 3
     }
     listoParaEnviar = true;
     datoRecibido = false;

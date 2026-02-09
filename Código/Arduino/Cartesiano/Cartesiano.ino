@@ -5,6 +5,7 @@
 
 // Dirección esclavo
 #define SLAVE_ADDR 0x30
+#define NUM_MUESTRAS 20
 
 // Estancias MCP
 Adafruit_MCP23X17 mcp1;   // 0x20
@@ -37,6 +38,7 @@ unsigned int pasos = 1000;     // 100 pasos ≈ 1 mm
 int op = 0;
 
 // Variables de TCS3200
+#define NUM_MUESTRAS 15
 struct ColorSensor { // Estructura de los sensores
   int s0, s1, s2, s3, out;
 };
@@ -96,55 +98,64 @@ void loop() {
         case 7: //carga estacion 1
           comando = 4;  enviari2c();  esperarACK();
           comando = 10; enviari2c();  esperarACK();
-          comando = 1;  enviari2c();  esperarACK();
-          color = leerColor(sensores[0]);
-          enviarColorSerial(color);    // luego color
-          garra(1);
-          comando = 7;  enviari2c();  esperarACK();
-          garra(0);   break;
+          comando = 1;  enviari2c();  esperarACK(); break;          
         case 8: //carga estacion 2
           comando = 5;  enviari2c();  esperarACK();
           comando = 11; enviari2c();  esperarACK();
-          comando = 2;  enviari2c();  esperarACK();
-          color = leerColor(sensores[1]);
-          enviarColorSerial(color);    // luego color
-          garra(1);
-          comando = 8;  enviari2c();  esperarACK();
-          garra(0);   break;
+          comando = 2;  enviari2c();  esperarACK(); break;         
         case 9: //carga estacion 3
           comando = 6;  enviari2c();  esperarACK();
           comando = 12; enviari2c();  esperarACK();
-          comando = 3;  enviari2c();  esperarACK();
-          color = leerColor(sensores[2]);
-          enviarColorSerial(color);    // luego color
+          comando = 3;  enviari2c();  esperarACK(); break;          
+        case 10: //caja estacion 1 -> cartesiano
           garra(1);
-          comando = 9;  enviari2c();  esperarACK();
+          comando = 7;  enviari2c();  esperarACK(); delay(1500);
           garra(0);   break;
-        case 10: //descarga estacion 1
+        case 11: //caja estacion 2 -> cartesiano
+          garra(1);
+          comando = 8;  enviari2c();  esperarACK(); delay(1500);
+          garra(0);   break;
+        case 12: //caja estacion 3 -> cartesiano
+          garra(1);
+          comando = 9;  enviari2c();  esperarACK(); delay(1500);
+          garra(0);   break;
+        case 13: //caja cartesiano -> estacion 1 
           garra(1);
           comando = 10;  enviari2c();  esperarACK();
-          pasos=100; mov_garra(2);  delay(1000);
-          garra(0);     
+          pasos=100; mov_garra(2);
+          garra(0);   break;
+        case 14: //caja cartesiano -> estacion 2
+          garra(1);
+          comando = 11;  enviari2c();  esperarACK();
+          pasos=100; mov_garra(2);
+          garra(0);   break;
+        case 15: //caja cartesiano -> estacion 3
+          garra(1);
+          comando = 12;  enviari2c();  esperarACK();
+          pasos=100; mov_garra(2);
+          garra(0);   break;
+        case 16: //descarga estacion 1
           comando = 4;  enviari2c();  esperarACK();
           comando = 7;  enviari2c();  esperarACK();
           comando = 1;  enviari2c();  esperarACK();  break;
-        case 11: //descarga estacion 2
-          garra(1);
-          comando = 11;  enviari2c();  esperarACK();
-          pasos=100; mov_garra(2);  delay(1000);
-          garra(0);     
+        case 17: //descarga estacion 2
           comando = 5;  enviari2c();  esperarACK();
           comando = 8;  enviari2c();  esperarACK();
           comando = 2;  enviari2c();  esperarACK();  break;
-        case 12: //descarga estacion 2
-          garra(1);
-          comando = 12;  enviari2c();  esperarACK();
-          pasos=100; mov_garra(2);  delay(1000);
-          garra(0);     
+        case 18: //descarga estacion 2           
           comando = 6;  enviari2c();  esperarACK();
           comando = 9;  enviari2c();  esperarACK();
           comando = 3;  enviari2c();  esperarACK();   break;
-        case 13: //enviar arreglo de sensores
+        case 19: //lee color estacion 1
+          color = leerColorEstacion(0);
+          enviarColorSerial(color);   break;
+        case 20: //lee color estacion 2
+          color = leerColorEstacion(1);
+          enviarColorSerial(color);   break;
+        case 21: //lee color estacion 3
+          color = leerColorEstacion(2);
+          enviarColorSerial(color);   break;         
+        case 22: //enviar arreglo de sensores
           leerSensoresPresencia(); 
           enviarPresenciaSerial();  break;
       }
@@ -238,76 +249,80 @@ void initSensor(ColorSensor &s)
   digitalWrite(s.s1, HIGH);
 }
 
-int leerRojo(ColorSensor &s){
-  digitalWrite(s.s2, LOW);
-  digitalWrite(s.s3, LOW);
-  return pulseIn(s.out, LOW);
-}
-
-int leerVerde(ColorSensor &s){
-  digitalWrite(s.s2, HIGH);
-  digitalWrite(s.s3, HIGH);
-  return pulseIn(s.out, LOW);
-}
-
-int leerAzul(ColorSensor &s){
-  digitalWrite(s.s2, LOW);
-  digitalWrite(s.s3, HIGH);
-  return pulseIn(s.out, LOW);
-}
-
-int clasificar(int R, int V, int A)
+int leerCanal(ColorSensor &s, bool s2, bool s3)
 {
-  if (A < V && A < R)
-    return 3; // azul
-
-  else if (R < V && R < A)
-    return 1; // rojo
-
-  else if (V < R && V < A)
-    return 2; // verde
-
-  else
-    return 0; // desconocido
+  digitalWrite(s.s2,s2);
+  digitalWrite(s.s3,s3);
+  return pulseIn(s.out,LOW);
 }
 
-int leerColor(ColorSensor &s)
+int leerRojo (ColorSensor &s){ return leerCanal(s,LOW,LOW);  }
+int leerVerde(ColorSensor &s){ return leerCanal(s,HIGH,HIGH);}
+int leerAzul (ColorSensor &s){ return leerCanal(s,LOW,HIGH); }
+
+
+void leerRGB(byte idx,int &R,int &V,int &A)
 {
-  const byte MUESTRAS = 7;   // 7 u 9 es buen equilibrio
+  long r=0,v=0,a=0;
 
-  int conteo[4] = {0,0,0,0};
-
-  for(byte i = 0; i < MUESTRAS; i++)
+  for(int i=0;i<NUM_MUESTRAS;i++)
   {
-    int R = leerRojo(s);
-    delay(5);
-
-    int V = leerVerde(s);
-    delay(5);
-
-    int A = leerAzul(s);
-    delay(5);
-
-    int color = clasificar(R, V, A);
-
-    if(color >= 0 && color < 4)   // seguridad
-      conteo[color]++;
+    r+=leerRojo(sensores[idx]);
+    v+=leerVerde(sensores[idx]);
+    a+=leerAzul(sensores[idx]);
   }
 
-  // voto mayoritario
-  int ganador = 0;
+  R=r/NUM_MUESTRAS;
+  V=v/NUM_MUESTRAS;
+  A=a/NUM_MUESTRAS;
 
-  for(byte i = 1; i < 4; i++)
-    if(conteo[i] > conteo[ganador])
-      ganador = i;
+  Serial.print("E"); Serial.print(idx+1);
+  Serial.print(" R:"); Serial.print(R);
+  Serial.print(" V:"); Serial.print(V);
+  Serial.print(" A:"); Serial.println(A);
+}
 
-  return ganador;
+
+// 1=rojo 2=verde 3=azul
+
+byte clasificarE1(int R,int V,int A)
+{
+  if(R<25 && V>30) return 1;
+  else if(V<23 && A<22) return 2;
+  else if(A<16 && R>35) return 3;
+  return 0;
+}
+
+byte clasificarE2(int R,int V,int A)
+{
+  if(R < 25 && A < 25 && V > 30) return 1;
+  else if(V < 27 && R > 30 && R < 42 && A > 30 && A < 42) return 2;
+  else if(R > 43 && A > 43) return 3;
+  return 0;
+}
+
+byte clasificarE3(int R,int V,int A)
+{
+  if(R<22 && V>35) return 1;
+  else if(V<26 && A>22) return 2;
+  else if(A<20 && R>40) return 3;
+  return 0;
+}
+
+byte clasificarPorEstacion(byte est,int R,int V,int A)
+{
+  if(est==0) return clasificarE1(R,V,A);
+  if(est==1) return clasificarE2(R,V,A);
+  if(est==2) return clasificarE3(R,V,A);
+  return 0;
 }
 
 // Lee una estación específica (0,1,2)
-byte leerColorEstacion(byte estacion)
+byte leerColorEstacion(byte est)
 {
-  return leerColor(sensores[estacion]);
+  int R,V,A;
+  leerRGB(est,R,V,A);
+  return clasificarPorEstacion(est,R,V,A);
 }
 
 // Envía todo el arreglo a Python por serial
@@ -316,8 +331,6 @@ void enviarColorSerial(byte color)
   Serial.print("C:");
   Serial.println(color);
 }
-
-
 
 // Funciones I2C
 void enviari2c(){
@@ -448,6 +461,6 @@ void garra(int direccion){
   delayMicroseconds(retardo);
   }
   digitalWrite(Enable, HIGH);  // Deshabilita el Driver
-  delay(500);
+  delay(1500);
   retardo = 800;
 }
