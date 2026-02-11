@@ -32,7 +32,7 @@ const int FC5 = 37;  //  Estacion 2 abajo
 const int FC6 = 39;  //  Estacion 3 abajo
 
 // Variables de funcionamiento de motores NEMA 17
-int retardo = 800;   // Menor numero = más rápido
+int retardo = 700;   // Menor numero = más rápido
 unsigned int pasos = 0; 
 
 // Variables I2C
@@ -89,9 +89,9 @@ void loop(){
       case 7: delay(500); servogarra1.write(90);  delay(500);  respuesta = 1;  break;  //abrir pinza 1
       case 8: delay(500); servogarra2.write(90);  delay(500);  respuesta = 1;  break;  //abrir pinza 2
       case 9: delay(500); servogarra3.write(90);  delay(500);  respuesta = 1;  break;  //abrir pinza 3
-      case 10: delay(500);  servogarra1.write(0);  delay(500);  respuesta = 1;  break;  //cerrar pinza 1
-      case 11: delay(500);  servogarra2.write(0);  delay(500);  respuesta = 1;  break;  //cerrar pinza 2
-      case 12: delay(500);  servogarra3.write(0);  delay(500);  respuesta = 1;  break;  //cerrar pinza 3
+      case 10: delay(500);  servogarra1.write(10);  delay(500);  respuesta = 1;  break;  //cerrar pinza 1
+      case 11: delay(500);  servogarra2.write(10);  delay(500);  respuesta = 1;  break;  //cerrar pinza 2
+      case 12: delay(500);  servogarra3.write(10);  delay(500);  respuesta = 1;  break;  //cerrar pinza 3
     }
     listoParaEnviar = true;
     datoRecibido = false;

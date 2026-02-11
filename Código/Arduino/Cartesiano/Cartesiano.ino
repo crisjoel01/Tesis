@@ -2,10 +2,15 @@
 #include <Wire.h>
 #include <Arduino.h>
 #include <Adafruit_MCP23X17.h>
+#include "Adafruit_TCS34725.h"
 
 // Dirección esclavo
 #define SLAVE_ADDR 0x30
-#define NUM_MUESTRAS 20
+#define TCA_ADDR 0x70
+#define NUM_MUESTRAS 10
+#define NUM_ESTACIONES 3
+#define UMBRAL_DISTANCIA 0.15
+
 
 // Estancias MCP
 Adafruit_MCP23X17 mcp1;   // 0x20
@@ -33,19 +38,35 @@ const int FCY = 10;  // Y
 const int FCZ = 11;  // Z
 
 // Variables de nema
-int retardo = 800;   // Menor numero = más rápido
+int retardo = 900;   // Menor numero = más rápido
 unsigned int pasos = 1000;     // 100 pasos ≈ 1 mm
 int op = 0;
 
-// Variables de TCS3200
-#define NUM_MUESTRAS 15
-struct ColorSensor { // Estructura de los sensores
-  int s0, s1, s2, s3, out;
-};
-ColorSensor sensores[3] = { // Pines de las estaciones
-  {43, 41, 37, 39, 35}, // Estación 1
-  {31, 29, 25, 27, 23}, // Estación 2
-  {52, 50, 46, 48, 44}  // Estación 3
+// Variables TCA9548A
+Adafruit_TCS34725 tcs(TCS34725_INTEGRATIONTIME_154MS, TCS34725_GAIN_4X);
+
+
+const float ref[3][3][3] = {
+  // -------- Estación 1 --------
+  {
+    {0.738, 0.329, 0.302},  // rojo
+    {0.472, 0.502, 0.354},  // verde
+    {0.492, 0.478, 0.458}   // azul
+  },
+
+  // -------- Estación 2 --------
+  {
+    {0.670, 0.322, 0.268},  // rojo
+    {0.383, 0.448, 0.274},  // verde
+    {0.431, 0.447, 0.418}   // azul
+  },
+
+  // -------- Estación 3 --------
+  {
+    {0.715, 0.408, 0.378},  // rojo
+    {0.491, 0.504, 0.381},  // verde
+    {0.531, 0.501, 0.482}   // azul
+  }
 };
 
 byte color = 0;
@@ -67,9 +88,6 @@ void setup() {
   pinMode(FCX, INPUT_PULLUP);
   pinMode(FCZ, INPUT_PULLUP);
 
-  for(int i=0;i<3;i++)
-    initSensor(sensores[i]);
-  
   initMCPs();
   home();
 }
@@ -79,7 +97,7 @@ void loop() {
     String datos = Serial.readStringUntil('\n');  // Lee hasta salto de línea
     datos.trim();  // Elimina espacios o \r
 
-    // Opción 1: Parseo con separadores "q0:valor,q1:valor"
+    // Opción 1: Parseo con separadores 
     int i0 = datos.indexOf("op:");
     int i1 = datos.indexOf("pasos:");
 
@@ -88,7 +106,7 @@ void loop() {
       pasos = datos.substring(i1 + 6).toInt();
 
       switch (op) {
-        case 0: home();       break;  //seteo home
+        case 0: home(); comando = 0;  enviari2c();  esperarACK(); break;  //seteo home
         case 1: mov_garra(1); break;  //subir
         case 2: mov_garra(2); break;  //bajar
         case 3: mov_garra(3); break;  //izquierda
@@ -235,94 +253,176 @@ void enviarPresenciaSerial()
   Serial.println();
 }
 
-// Funciones TCS3200
-void initSensor(ColorSensor &s)
+// Funciones TCA9548A
+void tcaSelect(uint8_t canal)
 {
-  pinMode(s.s0, OUTPUT);
-  pinMode(s.s1, OUTPUT);
-  pinMode(s.s2, OUTPUT);
-  pinMode(s.s3, OUTPUT);
-  pinMode(s.out, INPUT);
-
-  // Escala frecuencia 100% (máxima precisión)
-  digitalWrite(s.s0, HIGH);
-  digitalWrite(s.s1, HIGH);
+  Wire.beginTransmission(TCA_ADDR);
+  Wire.write(1 << canal);
+  Wire.endTransmission();
 }
 
-int leerCanal(ColorSensor &s, bool s2, bool s3)
+bool initSensor()
 {
-  digitalWrite(s.s2,s2);
-  digitalWrite(s.s3,s3);
-  return pulseIn(s.out,LOW);
+  if (!tcs.begin()) return false;
+  delay(10);
+  return true;
 }
 
-int leerRojo (ColorSensor &s){ return leerCanal(s,LOW,LOW);  }
-int leerVerde(ColorSensor &s){ return leerCanal(s,HIGH,HIGH);}
-int leerAzul (ColorSensor &s){ return leerCanal(s,LOW,HIGH); }
-
-
-void leerRGB(byte idx,int &R,int &V,int &A)
+float calcularDistancia(float r1, float g1, float b1, float r2, float g2, float b2)
 {
-  long r=0,v=0,a=0;
+  float dr = r1 - r2;
+  float dg = g1 - g2;
+  float db = b1 - b2;
+  
+  return sqrt(dr*dr + dg*dg + db*db);
+}
+
+void leerRGB(byte est, float &rN, float &gN, float &bN)
+{
+  uint8_t canal = est;
+  tcaSelect(canal);
+  if (!initSensor())
+  {
+    Serial.print("E"); Serial.print(est+1); 
+    Serial.println(" -> SENSOR NO DETECTADO");
+    rN = gN = bN = 0;
+    return;
+  }
+
+  uint32_t rSum=0, gSum=0, bSum=0, cSum=0;
 
   for(int i=0;i<NUM_MUESTRAS;i++)
   {
-    r+=leerRojo(sensores[idx]);
-    v+=leerVerde(sensores[idx]);
-    a+=leerAzul(sensores[idx]);
+    uint16_t r,g,b,c;
+    tcs.getRawData(&r,&g,&b,&c);
+    rSum+=r;
+    gSum+=g;
+    bSum+=b;
+    cSum+=c;
+    delay(5);
   }
 
-  R=r/NUM_MUESTRAS;
-  V=v/NUM_MUESTRAS;
-  A=a/NUM_MUESTRAS;
+  float r = rSum/(float)NUM_MUESTRAS;
+  float g = gSum/(float)NUM_MUESTRAS;
+  float b = bSum/(float)NUM_MUESTRAS;
+  float c = cSum/(float)NUM_MUESTRAS;
 
-  Serial.print("E"); Serial.print(idx+1);
-  Serial.print(" R:"); Serial.print(R);
-  Serial.print(" V:"); Serial.print(V);
-  Serial.print(" A:"); Serial.println(A);
+  if(c < 40) { rN=gN=bN=0; return; }  // vacío
+
+  rN = r/c;
+  gN = g/c;
+  bN = b/c;
+
+  Serial.print("E"); Serial.print(est+1);
+  Serial.print(" rN:"); Serial.print(rN,3);
+  Serial.print(" gN:"); Serial.print(gN,3);
+  Serial.print(" bN:"); Serial.println(bN,3);
 }
 
-
-// 1=rojo 2=verde 3=azul
-
-byte clasificarE1(int R,int V,int A)
+byte clasificarE1(float rN, float gN, float bN)
 {
-  if(R<25 && V>30) return 1;
-  else if(V<23 && A<22) return 2;
-  else if(A<16 && R>35) return 3;
-  return 0;
+  // =========================
+  // ROJO
+  // r muy dominante
+  // =========================
+  if(rN > gN + 0.15 &&
+     rN > bN + 0.15)
+  {
+    return 1;
+  }
+
+  // =========================
+  // VERDE
+  // g dominante claro y b bajo
+  // =========================
+  if(gN > rN + 0.04 &&
+     gN > bN + 0.12 &&
+     bN < 0.33)
+  {
+    return 2;
+  }
+
+  return 3;
 }
 
-byte clasificarE2(int R,int V,int A)
+
+
+byte clasificarE2(float rN, float gN, float bN)
 {
-  if(R < 25 && A < 25 && V > 30) return 1;
-  else if(V < 27 && R > 30 && R < 42 && A > 30 && A < 42) return 2;
-  else if(R > 43 && A > 43) return 3;
-  return 0;
+  // =========================
+  // ROJO
+  // r dominante fuerte
+  // =========================
+  if(rN > gN + 0.12 &&
+     rN > bN + 0.12)
+  {
+    return 1;
+  }
+
+  // =========================
+  // VERDE
+  // g dominante claro y b bajo
+  // =========================
+  if(gN > rN + 0.05 &&
+     gN > bN + 0.12 &&
+     bN < 0.32)
+  {
+    return 2;
+  }
+
+  return 3;
 }
 
-byte clasificarE3(int R,int V,int A)
+
+
+byte clasificarE3(float rN, float gN, float bN)
 {
-  if(R<22 && V>35) return 1;
-  else if(V<26 && A>22) return 2;
-  else if(A<20 && R>40) return 3;
-  return 0;
+  // =========================
+  // ROJO
+  // r dominante fuerte
+  // =========================
+  if(rN > gN + 0.15 &&
+     rN > bN + 0.15)
+  {
+    return 1;
+  }
+
+  // =========================
+  // VERDE
+  // g dominante claro y b bajo
+  // =========================
+  if(gN > rN + 0.04 &&
+     gN > bN + 0.12 &&
+     bN < 0.33)
+  {
+    return 2;
+  }
+
+  return 3;
 }
 
-byte clasificarPorEstacion(byte est,int R,int V,int A)
+
+
+
+byte clasificarPorEstacion(byte est, float rN, float gN, float bN)
 {
-  if(est==0) return clasificarE1(R,V,A);
-  if(est==1) return clasificarE2(R,V,A);
-  if(est==2) return clasificarE3(R,V,A);
-  return 0;
+  // Si no hay lectura válida
+  if(rN == 0 && gN == 0 && bN == 0) return 0;
+
+  switch(est)
+  {
+    case 0: return clasificarE1(rN, gN, bN);
+    case 1: return clasificarE2(rN, gN, bN);
+    case 2: return clasificarE3(rN, gN, bN);
+    default: return 0;
+  }
 }
 
-// Lee una estación específica (0,1,2)
 byte leerColorEstacion(byte est)
 {
-  int R,V,A;
-  leerRGB(est,R,V,A);
-  return clasificarPorEstacion(est,R,V,A);
+  float rN,gN,bN;
+  leerRGB(est,rN,gN,bN);
+  return clasificarPorEstacion(est,rN,gN,bN);
 }
 
 // Envía todo el arreglo a Python por serial
@@ -422,7 +522,7 @@ void mov_garra(int direccion) {
   delayMicroseconds(retardo);
   }
   digitalWrite(Enable, HIGH);  // Deshabilita el Driver
-
+  delay(500);
 }
 
 void garra(int direccion){
