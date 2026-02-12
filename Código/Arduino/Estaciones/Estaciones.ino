@@ -6,16 +6,16 @@
 #define SLAVE_ADDR 0x30
 
 // Pines Nema 1 ESTACION 1
-#define Step 2    
-#define Dir 5     
+#define Step 4    
+#define Dir 7    
 
 // Pines Nema 2 ESTACION 2
 #define Step2 3    
 #define Dir2 6    
 
 // Pines Nema 3 ESTACION 3
-#define Step3 4    
-#define Dir3 7   
+#define Step3 2    
+#define Dir3 5  
 #define Enable 8 
 
 // Declaración de servomotores
@@ -24,12 +24,12 @@ Servo servogarra2;
 Servo servogarra3;
 
 // Pines para los finales de carrera (configuración Pull-Up)
-const int FC1 = 9;   //  Estacion 1 arriba
+const int FC1 = 11;   //  Estacion 1 arriba
 const int FC2 = 10;  //  Estacion 2 arriba
-const int FC3 = 11;  //  Estacion 3 arriba
-const int FC4 = 35;  //  Estacion 1 abajo
+const int FC3 = 9;  //  Estacion 3 arriba
+const int FC4 = 39;  //  Estacion 1 abajo
 const int FC5 = 37;  //  Estacion 2 abajo
-const int FC6 = 39;  //  Estacion 3 abajo
+const int FC6 = 35;  //  Estacion 3 abajo
 
 // Variables de funcionamiento de motores NEMA 17
 int retardo = 700;   // Menor numero = más rápido
@@ -62,9 +62,9 @@ void setup() {
   pinMode(FC5, INPUT_PULLUP);
   pinMode(FC6, INPUT_PULLUP);
 
-  servogarra1.attach(45);
+  servogarra1.attach(46);
   servogarra2.attach(44);
-  servogarra3.attach(46);
+  servogarra3.attach(45);
 
   Serial.begin(115200);
 
@@ -79,20 +79,21 @@ void loop(){
   if (datoRecibido) {
 
     switch (op) {
-      case 0: home_estaciones();    delay(1000);    respuesta = 1;  break;  //posicion home
-      case 1: estacion(Step, Dir, FC1, FC4, 1);     respuesta = 1;  break;  //sube estacion 1
-      case 2: estacion(Step2, Dir2, FC2, FC5, 1);   respuesta = 1;  break;  //sube estacion 2
-      case 3: estacion(Step3, Dir3, FC3, FC6, 1);   respuesta = 1;  break;  //sube estacion 3
-      case 4: estacion(Step, Dir, FC1, FC4, 0);     respuesta = 1;  break;  //baja estacion 1
-      case 5: estacion(Step2, Dir2, FC2, FC5, 0);   respuesta = 1;  break;  //baja estacion 2
-      case 6: estacion(Step3, Dir3, FC3, FC6, 0);   respuesta = 1;  break;  //baja estacion 3
-      case 7: delay(500); servogarra1.write(90);  delay(500);  respuesta = 1;  break;  //abrir pinza 1
-      case 8: delay(500); servogarra2.write(90);  delay(500);  respuesta = 1;  break;  //abrir pinza 2
-      case 9: delay(500); servogarra3.write(90);  delay(500);  respuesta = 1;  break;  //abrir pinza 3
-      case 10: delay(500);  servogarra1.write(10);  delay(500);  respuesta = 1;  break;  //cerrar pinza 1
-      case 11: delay(500);  servogarra2.write(10);  delay(500);  respuesta = 1;  break;  //cerrar pinza 2
-      case 12: delay(500);  servogarra3.write(10);  delay(500);  respuesta = 1;  break;  //cerrar pinza 3
+      case 0: home_estaciones();    delay(500);    break;  //posicion home
+      case 1: estacion(Step, Dir, FC1, FC4, 1);     break;  //sube estacion 1
+      case 2: estacion(Step2, Dir2, FC2, FC5, 1);   break;  //sube estacion 2
+      case 3: estacion(Step3, Dir3, FC3, FC6, 1);   break;  //sube estacion 3
+      case 4: estacion(Step, Dir, FC1, FC4, 0);     break;  //baja estacion 1
+      case 5: estacion(Step2, Dir2, FC2, FC5, 0);   break;  //baja estacion 2
+      case 6: estacion(Step3, Dir3, FC3, FC6, 0);   break;  //baja estacion 3
+      case 7: delay(500); servogarra1.write(90);  delay(500);  break;  //abrir pinza 1
+      case 8: delay(500); servogarra2.write(90);  delay(500);  break;  //abrir pinza 2
+      case 9: delay(500); servogarra3.write(90);  delay(500);  break;  //abrir pinza 3
+      case 10: delay(500);  servogarra1.write(10);  delay(500);  break;  //cerrar pinza 1
+      case 11: delay(500);  servogarra2.write(10);  delay(500);  break;  //cerrar pinza 2
+      case 12: delay(500);  servogarra3.write(10);  delay(500);  break;  //cerrar pinza 3
     }
+    respuesta = 1;
     listoParaEnviar = true;
     datoRecibido = false;
   }
@@ -103,6 +104,7 @@ void recibirDato(int bytes) {
     op = Wire.read();
     listoParaEnviar = false;
     datoRecibido = true;
+    
   }
 }
 

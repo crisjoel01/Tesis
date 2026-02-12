@@ -3,7 +3,6 @@ import serial
 import time
 import threading
 import datetime
-import queue
 from serial.tools import list_ports
 from collections import deque
 import tkinter as tk
@@ -13,12 +12,6 @@ from tkinter import messagebox
 import random
 
 print(sys.executable)
-
-# ================= THREAD SAFETY =================
-serial_lock = threading.Lock()
-ocupado_lock = threading.Lock()
-cola_comandos = queue.Queue()
-hilo_serial_activo = False
 
 # ================= COMANDOS =================
 HOME = 0
@@ -62,7 +55,10 @@ ALTURAS_MM = [160, 155, 157.5, 155, 155]
 
 ALGORITMO_ACTUAL = "zonas"
 
+ocupado = False
+
 lista_instrucciones = []
+
 
 # ================= POSICIÓN ACTUAL DEL CARRO =================
 pos_actual_x = 0
@@ -103,9 +99,9 @@ zona_frecuente_color = {
 }
 
 ranking_colores = {
-    1: {1: 3, 2: 3, 3: 3},  # Todos los colores comienzan con índice 3 (baja prioridad)
-    2: {1: 3, 2: 3, 3: 3},
-    3: {1: 3, 2: 3, 3: 3}
+    1: {1: 1, 2: 2, 3: 3},  # Inicial: Rojo=1, Verde=2, Azul=3
+    2: {1: 1, 2: 2, 3: 3},
+    3: {1: 1, 2: 2, 3: 3}
 }
 
 # ====== zonas físicas ======
@@ -118,6 +114,7 @@ ZONAS_FRECUENTES = {
 ZONA_NEUTRA = [7,17] + list(range(21,31))
 ZONA_BAJA   = list(range(31,51))
 
+
 # ================= SERIAL =================
 puerto = None
 
@@ -125,117 +122,114 @@ puerto = None
 def mm_a_pasos(mm):
     return int(mm * PASOS_POR_MM)
 
+
 # ================= ESTADO LOGICO =================
 def actualizar_estado_logico():
     for i in range(TOTAL_CELDAS):
+
         if presencia[i] == 0 and color[i] == 0:
             estado_logico[i] = 0
+
         elif presencia[i] == 1 and color[i] in (1, 2, 3):
             estado_logico[i] = color[i]
         else:
             estado_logico[i] = 4
+
     log("Estado lógico actualizado")
 
-# ================= SERIAL CORE CON THREAD SAFETY =================
-def procesar_cola_serial():
-    """Procesa comandos en cola SECUENCIALMENTE"""
-    global hilo_serial_activo
-    while hilo_serial_activo:
-        try:
-            op, pasos, callback = cola_comandos.get(timeout=0.1)
-            resultado = enviar_comando_directo(op, pasos)
-            if callback:
-                root.after(0, lambda: callback(resultado))
-        except queue.Empty:
-            continue
-        except Exception as e:
-            log(f"Error en cola serial: {e}")
 
-def enviar_comando(op, pasos=0, callback=None):
-    """Encola un comando para ejecución secuencial"""
-    cola_comandos.put((op, pasos, callback))
+# ================= SERIAL CORE =================
+def enviar_comando(op, pasos=0):
 
-def enviar_comando_directo(op, pasos=0):
-    """Ejecuta comando directamente CON LOCK"""
-    with serial_lock:
-        if puerto is None or not puerto.is_open:
-            log("ERROR: Puerto serial no disponible")
-            return None
+    if puerto is None or not puerto.is_open:
+        log("ERROR: Puerto serial no disponible")
+        return
 
-        mensaje = f"op:{op},pasos:{pasos}\n"
-        try:
-            puerto.write(mensaje.encode())
-            log(f"→ {mensaje.strip()}")
-            set_estado(False)
-        except Exception as e:
-            log(f"Error al enviar comando: {e}")
-            set_estado(True)
-            return None
+    mensaje = f"op:{op},pasos:{pasos}\n"
+    puerto.write(mensaje.encode())
 
-        color_detectado = None
-        ack_recibido = False
-        color_recibido = False
-        requiere_color = op in (19, 20, 21)
+    log(f"→ {mensaje.strip()}")
+    set_estado(False)
 
-        while True:
-            try:
-                if puerto.in_waiting:
-                    resp = puerto.readline().decode().strip()
-                    if resp:
-                        log(f"Arduino → {resp}")
+    color_detectado = None
 
-                        if resp.startswith("C:"):
-                            color_detectado = int(resp.split(":")[1])
-                            color_recibido = True
-                        elif resp == "ACK:1":
-                            ack_recibido = True
-                            if op == HOME:
-                                global pos_actual_x, pos_actual_y
-                                pos_actual_x = 0
-                                pos_actual_y = 0
-            except Exception as e:
-                log(f"Error leyendo puerto: {e}")
+    ack_recibido = False
+    color_recibido = False
+
+    # comandos que DEVUELVEN color
+    requiere_color = op in (19, 20, 21)
+
+    while True:
+
+        if puerto.in_waiting:
+            resp = puerto.readline().decode().strip()
+            log(f"Arduino → {resp}")
+
+            # ---- COLOR ----
+            if resp.startswith("C:"):
+                color_detectado = int(resp.split(":")[1])
+                color_recibido = True
+
+            # ---- ACK ----
+            elif resp == "ACK:1":
+                ack_recibido = True
+
+                if op == HOME:
+                    global pos_actual_x, pos_actual_y
+                    pos_actual_x = 0
+                    pos_actual_y = 0
+
+        # lógica de salida
+        if requiere_color:
+            if ack_recibido and color_recibido:
+                break
+        else:
+            if ack_recibido:
                 break
 
-            if requiere_color:
-                if ack_recibido and color_recibido:
-                    break
-            else:
-                if ack_recibido:
-                    break
+        time.sleep(0.01)
 
-            time.sleep(0.01)
+    set_estado(True)
+    return color_detectado
 
-        set_estado(True)
-        return color_detectado
+
+
 
 # ================= LECTURA SENSORES =================
 def leer_sensores():
+
     if puerto is None or not puerto.is_open:
         return
 
-    def callback(resultado):
-        pass
+    puerto.write(f"op:{LEER_SENSORES},pasos:0\n".encode())
 
-    enviar_comando(LEER_SENSORES, 0, callback)
-    root.after(100, verificar_sensores)
+    inicio = time.time()
 
-def verificar_sensores():
-    """Verifica si hay datos de sensores en el buffer"""
-    if puerto and puerto.is_open and puerto.in_waiting:
-        try:
-            with serial_lock:
-                linea = puerto.readline().decode().strip()
+    while time.time() - inicio < 3:
+
+        if puerto.in_waiting:
+
+            linea = puerto.readline().decode().strip()
+            log(f"Arduino → {linea}")
+
             if linea.startswith("SENSORS:"):
+
                 datos = linea.replace("SENSORS:", "").split(',')
+
                 for i in range(min(len(datos), TOTAL_CELDAS)):
                     presencia[i] = int(datos[i])
+
                 actualizar_estado_logico()
                 actualizar_grid()
                 log("Sensores OK")
-        except:
-            pass
-    root.after(200, verificar_sensores)
+                return
+
+        time.sleep(0.01)
+
+    log("Sensores tardaron pero continuo sin bloquear")
+
+
+
 
 # ================= MOVIMIENTOS BASE =================
 def ir_a_estacion(estacion):
@@ -243,6 +237,7 @@ def ir_a_estacion(estacion):
     enviar_comando(HOME)
     pos_actual_x = 0
     pos_actual_y = 0
+
     enviar_comando(SUBIR, mm_a_pasos(Y_ESTACION_MM[estacion]))
     enviar_comando(DERECHA, mm_a_pasos(X_ESTACIONES_MM[estacion]))
     pos_actual_x = X_ESTACIONES_MM[estacion]
@@ -253,36 +248,46 @@ def ir_a_estacion_directo(estacion):
     y = Y_ESTACION_MM[estacion]
     mover_a(x, y)
     global pos_actual_x, pos_actual_y
+
     pos_actual_x = x
     pos_actual_y = y
 
 def ir_a_storage(posicion):
     global pos_actual_x, pos_actual_y
+
     fila = (posicion - 1) // ESPACIOS_X
     columna = (posicion - 1) % ESPACIOS_X
+
     y_mm = Y_INICIAL_MM + sum(ALTURAS_MM[:fila])
     x_mm = X_INICIAL_MM + columna * DX_MM
+
     enviar_comando(HOME)
     pos_actual_x = 0
     pos_actual_y = 0
+
     enviar_comando(SUBIR, mm_a_pasos(y_mm))
     enviar_comando(DERECHA, mm_a_pasos(x_mm))
     pos_actual_x = x_mm
     pos_actual_y = y_mm
 
+
 def ir_a_storage_directo(posicion):
     fila = (posicion - 1) // ESPACIOS_X
     columna = (posicion - 1) % ESPACIOS_X
+
     y = Y_INICIAL_MM + sum(ALTURAS_MM[:fila])
     x = X_INICIAL_MM + columna * DX_MM
+
     mover_a(x, y)
     global pos_actual_x, pos_actual_y
+
     pos_actual_x = x
     pos_actual_y = y
     
 # ================= MOVIMIENTO RELATIVO REAL =================
 def mover_a(x_dest_mm, y_dest_mm):
     global pos_actual_x, pos_actual_y
+
     dx = x_dest_mm - pos_actual_x
     dy = y_dest_mm - pos_actual_y
 
@@ -300,19 +305,27 @@ def mover_a(x_dest_mm, y_dest_mm):
     pos_actual_y = y_dest_mm
     
 def buscar_caja_mas_cercana(color_objetivo, x0, y0):
+
     mejor_pos = None
     mejor_dist = 1e9
 
     for i in range(TOTAL_CELDAS):
+
+        # solo cajas válidas del color solicitado
         if estado_logico[i] == color_objetivo:
+
             fila = i // ESPACIOS_X
-            col = i % ESPACIOS_X
+            col  = i % ESPACIOS_X
+
             x_mm = X_INICIAL_MM + col * DX_MM
             y_mm = Y_INICIAL_MM + sum(ALTURAS_MM[:fila])
+
             dist = abs(x_mm - x0) + abs(y_mm - y0)
+
             if dist < mejor_dist:
                 mejor_dist = dist
                 mejor_pos = i + 1
+
     return mejor_pos
 
 def coords_estacion(estacion):
@@ -320,54 +333,40 @@ def coords_estacion(estacion):
     y = Y_ESTACION_MM[estacion]
     return x, y
 
+
 # ================= CICLOS =================
 def ciclo_carga(estacion):
     global pos_actual_x, pos_actual_y
 
     ir_a_estacion_directo(estacion)
+    
     enviar_comando(CARGA_ESTACION[estacion])
     
-    color_detectado = None
-    def color_callback(resultado):
-        nonlocal color_detectado
-        color_detectado = resultado
-    
-    enviar_comando(LEER_COLOR_ESTACION[estacion], 0, color_callback)
-    time.sleep(0.5)
-    
+    color_detectado = enviar_comando(LEER_COLOR_ESTACION[estacion])
+
     if color_detectado is None:
         log("Color no detectado")
         color_detectado = 4
     
-    # ===== CORREGIDO: CADA estación define su índice 1 en su PRIMERA carga =====
     if color_detectado in (1, 2, 3):
-        # Verificar si ESTA estación ya tiene algún color con índice 1
-        tiene_indice1 = False
-        color_indice1 = None
-        for color_id, indice in ranking_colores[estacion].items():
-            if indice == 1:
-                tiene_indice1 = True
-                color_indice1 = color_id
-                break
+        # Verificar si el storage está completamente vacío
+        storage_vacio = all(p == 0 for p in presencia)
         
-        # Si NO tiene índice 1, esta carga define el índice 1
-        if not tiene_indice1:
+        if storage_vacio:
+            # Primera carga en storage vacío
             # Este color será índice 1 en su estación
             ranking_colores[estacion][color_detectado] = 1
             
-            # Los otros dos colores serán índice 3
-            for c in [1, 2, 3]:
-                if c != color_detectado:
-                    ranking_colores[estacion][c] = 3
+            # Los otros dos colores serán índice 2 y 3 (orden inicial)
+            otros_colores = [c for c in [1, 2, 3] if c != color_detectado]
+            ranking_colores[estacion][otros_colores[0]] = 2
+            ranking_colores[estacion][otros_colores[1]] = 3
             
-            # Actualizar zona_frecuente_color
+            # Actualizar zona_frecuente_color para compatibilidad
             zona_frecuente_color[estacion] = color_detectado
             
-            log(f"🎯 INICIALIZACIÓN: Estación {estacion} - Color {color_detectado}=índice1")
-        else:
-            log(f"Estación {estacion} ya tiene índice 1 = color {color_indice1}")
+            log(f"INICIALIZACIÓN: Estación {estacion} - {color_detectado}=índice1")
     
-    # ===== CORREGIDO: Pasar la estación, NO la posición actual =====
     posicion = elegir_posicion(color_detectado, estacion)
 
     if posicion is None:
@@ -379,31 +378,27 @@ def ciclo_carga(estacion):
         return
     
     enviar_comando(PASAR_CARTESIANO[estacion])
+    
     ir_a_storage_directo(posicion)
+
     enviar_comando(SACAR_GARRA)
     enviar_comando(BAJAR, mm_a_pasos(20))
     enviar_comando(METER_GARRA)
-    
-    # Verificar que la celda esté libre antes de ocuparla
-    if presencia[posicion-1] == 1:
-        log(f"ERROR: Celda {posicion} ya estaba ocupada!")
-    else:
-        presencia[posicion-1] = 1
-        color[posicion-1] = color_detectado
-        log(f"Caja {color_detectado} almacenada en celda {posicion}")
-    
+    presencia[posicion-1] = 1
+    color[posicion-1] = color_detectado
     actualizar_estado_logico()
     actualizar_grid()
     enviar_comando(HOME)
     pos_actual_x = 0
     pos_actual_y = 0
-    
+
 
 
 def ciclo_descarga(estacion, color_solicitado):
     global pos_actual_x, pos_actual_y
 
     x_est, y_est = coords_estacion(estacion)
+    
     pos = buscar_caja_mas_cercana(color_solicitado, x_est, y_est)
 
     if pos is None:
@@ -411,6 +406,7 @@ def ciclo_descarga(estacion, color_solicitado):
         return
     
     ir_a_storage_directo(pos)
+
     enviar_comando(BAJAR, mm_a_pasos(20))
     enviar_comando(SACAR_GARRA)
     enviar_comando(SUBIR, mm_a_pasos(20))
@@ -418,53 +414,59 @@ def ciclo_descarga(estacion, color_solicitado):
 
     presencia[pos-1] = 0
     color[pos-1] = 0
-    
     actualizar_frecuencia(estacion, color_solicitado)
     actualizar_estado_logico()
     actualizar_grid()
 
     ir_a_estacion_directo(estacion)
+
     enviar_comando(SUBIR, mm_a_pasos(10))
     enviar_comando(PASAR_ESTACION[estacion])
     enviar_comando(DESCARGA_ESTACION[estacion])
+
     enviar_comando(HOME)
     pos_actual_x = 0
     pos_actual_y = 0
 
 # =============== SELECCION DE ALGORITMO ==============
 def elegir_posicion(color_detectado, estacion):
-    """
-    IMPORTANTE: Recibe la estación, NO la posición actual del carro
-    La búsqueda debe ser desde la estación, no desde donde está el carro
-    """
-    # Obtener coordenadas de la estación
-    x_est, y_est = coords_estacion(estacion)
-    
+
     if ALGORITMO_ACTUAL == "zonas":
-        return buscar_celda_libre_zona(x_est, y_est)  # ← CORREGIDO: usa coordenadas de estación
+        return buscar_celda_libre_zona(pos_actual_x, pos_actual_y)
+
     elif ALGORITMO_ACTUAL == "producto":
-        return buscar_por_producto(color_detectado, x_est, y_est)  # ← CORREGIDO
+        return buscar_por_producto(color_detectado, pos_actual_x, pos_actual_y)
+
     elif ALGORITMO_ACTUAL == "frecuencia":
-        return buscar_por_frecuencia(estacion, color_detectado)  # ← CORREGIDO
+        return buscar_por_frecuencia(estacion, color_detectado)
+
     else:
         return None
 
 # ================ ALGORITMO POR ZONA ================
+
 def zona_por_pos(pos):
     col = (pos - 1) % ESPACIOS_X
     return (col // 2) + 1
 
+
 def buscar_celda_libre_zona(x0, y0):
+
     mejor_pos = None
     mejor_dist = 1e9
 
     for i in range(TOTAL_CELDAS):
+
         if estado_logico[i] == 0 and zona_por_pos(i+1) == ZONA_ACTIVA:
+
             fila = i // ESPACIOS_X
-            col = i % ESPACIOS_X
+            col  = i % ESPACIOS_X
+
             x_mm = X_INICIAL_MM + col * DX_MM
             y_mm = Y_INICIAL_MM + sum(ALTURAS_MM[:fila])
+
             dist = abs(x_mm - x0) + abs(y_mm - y0)
+
             if dist < mejor_dist:
                 mejor_dist = dist
                 mejor_pos = i + 1
@@ -476,35 +478,49 @@ def buscar_celda_libre_zona(x0, y0):
         log(f"Zona {ZONA_ACTIVA} -> pos elegida {mejor_pos}")
     return mejor_pos
 
+
 # ================ ALGORITMO POR PRODUCTO ================
+
+def distancia(a, b):
+    ax, ay = divmod(a, ESPACIOS_X)
+    bx, by = divmod(b, ESPACIOS_X)
+    return abs(ax - bx) + abs(ay - by)
+
 def columna_de_pos(pos): 
     return (pos - 1) % ESPACIOS_X 
 
 def producto_por_columnas(pos):
     col = columna_de_pos(pos)
     if 0 <= col <= 2:
-        return 1
+        return 1   # rojo
     elif 3 <= col <= 5:
-        return 2
+        return 2   # verde
     elif 7 <= col <= 9:
-        return 3
+        return 3   # azul
     else:
-        return 4
+        return 4   # desconocido (columna 3)
+
 
 def buscar_por_producto(color_objetivo, x0, y0):
     if color_objetivo == 0 or color_objetivo is None:
         color_objetivo = 4
+
         
     mejor_pos = None
     mejor_dist = 1e9
 
     for i in range(TOTAL_CELDAS):
+
         if estado_logico[i] == 0 and producto_por_columnas(i+1) == color_objetivo:
+
             fila = i // ESPACIOS_X
-            col = i % ESPACIOS_X
+            col  = i % ESPACIOS_X
+
             x_mm = X_INICIAL_MM + col * DX_MM
             y_mm = Y_INICIAL_MM + sum(ALTURAS_MM[:fila])
+
             dist = abs(x_mm - x0) + abs(y_mm - y0)
+
             if dist < mejor_dist:
                 mejor_dist = dist
                 mejor_pos = i + 1
@@ -513,12 +529,17 @@ def buscar_por_producto(color_objetivo, x0, y0):
     return mejor_pos
 
 # ================ ALGORITMO POR FRECUENCIA ================
+
+# Utilidades internas
 def distancia_mm_pos(pos, x0, y0):
     fila = (pos - 1) // ESPACIOS_X
-    col = (pos - 1) % ESPACIOS_X
+    col  = (pos - 1) % ESPACIOS_X
+
     x_mm = X_INICIAL_MM + col * DX_MM
     y_mm = Y_INICIAL_MM + sum(ALTURAS_MM[:fila])
+
     return abs(x_mm - x0) + abs(y_mm - y0)
+
 
 def contar_color_en_zona(celdas, color_obj):
     c = 0
@@ -527,121 +548,150 @@ def contar_color_en_zona(celdas, color_obj):
             c += 1
     return c
 
+
 def mejor_libre_en_lista(celdas, x0, y0):
     mejor = None
     mejor_d = 1e9
+
     for p in celdas:
         if estado_logico[p-1] == 0:
             d = distancia_mm_pos(p, x0, y0)
             if d < mejor_d:
                 mejor_d = d
                 mejor = p
+
     return mejor
 
+
+# Ranking + bootstrap + histéresis
 def calcular_ranking_estacion(est):
+
     hist = historial[est]
+
+    # BOOTSTRAP (almacén vacío o pocas muestras)
+    # orden de aparición define prioridad
     if len(hist) < 3:
         orden = []
         for c in hist:
             if c not in orden:
                 orden.append(c)
+
         for c in (1,2,3):
             if c not in orden:
                 orden.append(c)
+
         return orden[:3]
-    
+
+    # conteo normal
     conteo = {1:0, 2:0, 3:0}
     for c in hist:
         conteo[c] += 1
+
     ranking = sorted(conteo, key=lambda x: conteo[x], reverse=True)
     return ranking
 
+# Verificar si una caja puede ir a una zona frecuente
 def puede_ir_a_zona_frecuente(zona_estacion, color_caja):
+    """
+    Verifica si una caja de 'color_caja' puede ir a zona frecuente 'zona_estacion'
+    Regla: Cada zona frecuente solo acepta su color índice 1
+    """
+    # Obtener color líder de esta zona (índice 1)
     color_lider = None
     for color_id, indice in ranking_colores[zona_estacion].items():
         if indice == 1:
             color_lider = color_id
             break
+    
+    # Si no hay líder asignado, no acepta nada
     if color_lider is None:
         return False
+    
+    # La caja debe ser del MISMO color que el líder de la zona
     return color_caja == color_lider
 
+# Obtener índice de un color para una estación =====
 def obtener_indice_color(estacion, color_caja):
+    """Retorna el índice (1,2,3) de un color para una estación"""
     return ranking_colores[estacion].get(color_caja, 3)
 
 def actualizar_frecuencia(estacion, color_descargado):
+    """
+    Actualiza historial y recalcula índices basado en DESCARGAS
+    Mantiene compatibilidad con la función original pero añade ranking completo
+    """
+    # 1. Guardar en historial (solo descargas)
     historial[estacion].append(color_descargado)
+    
+    # 2. Recalcular índices basado en historial de DESCARGAS
     actualizar_indices_por_descargas(estacion)
+    
     log(f"Frecuencia actualizada - Estación {estacion} descargó {color_descargado}")
 
 def actualizar_indices_por_descargas(estacion):
     """
     Recalcula índices 1,2,3 basado en historial de descargas
     """
-    hist = list(historial[estacion])
+    hist = list(historial[estacion])  # Últimas 20 descargas
+    
     if len(hist) < 1:
-        return
+        return  # No hay suficientes datos
     
     # Contar frecuencia de descargas
     conteo = {1: 0, 2: 0, 3: 0}
     for color_desc in hist:
         conteo[color_desc] += 1
     
-    # Ordenar colores por frecuencia
+    # Ordenar colores por frecuencia (más frecuente primero)
     colores_ordenados = sorted(conteo.items(), key=lambda x: x[1], reverse=True)
     
-    # Guardar índice 1 anterior para log
-    indice1_anterior = None
-    for color_id, idx in ranking_colores[estacion].items():
-        if idx == 1:
-            indice1_anterior = color_id
-            break
-    
     # Asignar nuevos índices
+    # Índice 1 = más frecuente, Índice 3 = menos frecuente
     for idx, (color_id, _) in enumerate(colores_ordenados):
         ranking_colores[estacion][color_id] = idx + 1
     
-    # Índice 3 para colores no descargados
+    # Asignar índices a colores que no aparecieron en historial
     for color_id in [1, 2, 3]:
         if color_id not in [c for c, _ in colores_ordenados]:
-            ranking_colores[estacion][color_id] = 3
+            ranking_colores[estacion][color_id] = 3  # Menor prioridad
     
-    # Actualizar color líder con histéresis
-    if colores_ordenados and colores_ordenados[0][1] > 0:
+    # Actualizar color líder para zona frecuente (compatibilidad)
+    if colores_ordenados:
         nuevo_lider = colores_ordenados[0][0]
-        lider_actual = zona_frecuente_color[estacion]
         
+        # Verificar histéresis si hay líder anterior
+        lider_actual = zona_frecuente_color[estacion]
         if lider_actual is None:
             zona_frecuente_color[estacion] = nuevo_lider
-            log(f"🏆 Estación {estacion}: líder inicial {nuevo_lider}")
         elif lider_actual != nuevo_lider:
             if conteo[nuevo_lider] >= conteo[lider_actual] + HISTERESIS:
                 zona_frecuente_color[estacion] = nuevo_lider
-                log(f"🔄 Estación {estacion}: cambio de líder {lider_actual} → {nuevo_lider} (histéresis)")
+                log(f"Estación {estacion}: nuevo líder {nuevo_lider} (histéresis)")
     
-    # Log de índices actualizados
-    log(f"Estación {estacion} - Rojo:{ranking_colores[estacion][1]} Verde:{ranking_colores[estacion][2]} Azul:{ranking_colores[estacion][3]}")
+    # Log de cambios
+    log(f"Estación {estacion} índices: Rojo={ranking_colores[estacion][1]}, Verde={ranking_colores[estacion][2]}, Azul={ranking_colores[estacion][3]}")
 
 def buscar_celda_mas_cercana_en_zonas(zonas_lista, x_ref, y_ref):
+    """
+    Busca la celda libre más cercana en una lista de zonas
+    """
     mejor_pos = None
     mejor_dist = float('inf')
+    
     for zona in zonas_lista:
         for pos_celda in zona:
-            if estado_logico[pos_celda-1] == 0:
+            if estado_logico[pos_celda-1] == 0:  # Celda libre
                 dist = distancia_mm_pos(pos_celda, x_ref, y_ref)
                 if dist < mejor_dist:
                     mejor_dist = dist
                     mejor_pos = pos_celda
+    
     return mejor_pos
 
+# Selección principal de celda
 def buscar_por_frecuencia(estacion_origen, color_caja):
     """
     Implementa TODAS las reglas del algoritmo por frecuencia
-    - PRIMERO: Su propia zona frecuente (si índice 1)
-    - SEGUNDO: MIN_CAUSAS en otras zonas
-    - TERCERO: Otras zonas frecuentes
-    - CUARTO: Zona neutra (si aplica)
-    - QUINTO: Zona baja
     """
     if color_caja not in (1, 2, 3):
         log(f"Color {color_caja} no válido para algoritmo frecuencia")
@@ -654,77 +704,114 @@ def buscar_por_frecuencia(estacion_origen, color_caja):
     indice = obtener_indice_color(estacion_origen, color_caja)
     log(f"Frecuencia: Estación {estacion_origen}, Color {color_caja}, Índice {indice}")
     
-    # ===== 1. SU PROPIA zona frecuente (solo índice 1) =====
-    if indice == 1:
-        if puede_ir_a_zona_frecuente(estacion_origen, color_caja):
-            pos = mejor_libre_en_lista(ZONAS_FRECUENTES[estacion_origen], x_est, y_est)
-            if pos:
-                log(f"✅ Zona frecuente propia {estacion_origen} -> celda {pos}")
-                return pos
-    
-    # ===== 2. MIN_CAUSAS en OTRAS zonas frecuentes =====
+    # ===== REGLA 1: MIN_CAUSAS (PRIORIDAD ABSOLUTA) =====
     for zona_id, celdas in ZONAS_FRECUENTES.items():
-        # No aplicar MIN_CAUSAS en su propia zona (ya se intentó)
-        if zona_id == estacion_origen:
-            continue
-            
         # Verificar si en esta zona, el color_caja es índice 1
         if obtener_indice_color(zona_id, color_caja) == 1:
             cajas_en_zona = contar_color_en_zona(celdas, color_caja)
             if cajas_en_zona < MIN_CAUSAS:
                 pos = mejor_libre_en_lista(celdas, x_est, y_est)
                 if pos:
-                    log(f"⚠ MIN_CAUSAS: zona {zona_id} tiene {cajas_en_zona}/{MIN_CAUSAS} cajas -> celda {pos}")
+                    log(f"MIN_CAUSAS -> zona {zona_id} (solo {cajas_en_zona} cajas)")
                     return pos
     
-    # ===== 3. OTRAS zonas frecuentes (mismo color) =====
-    for zona_id, celdas in ZONAS_FRECUENTES.items():
-        # Saltar su propia zona si ya se intentó
-        if zona_id == estacion_origen and indice == 1:
-            continue
-            
-        if puede_ir_a_zona_frecuente(zona_id, color_caja):
-            pos = mejor_libre_en_lista(celdas, x_est, y_est)
-            if pos:
-                log(f"➡ Otra zona frecuente {zona_id} -> celda {pos}")
-                return pos
+    # ===== PREPARAR LISTAS DE ZONAS PERMITIDAS SEGÚN ÍNDICE =====
+    zonas_a_considerar = []
     
-    # ===== 4. ZONA NEUTRA (índice 1 y 2) =====
-    if indice in [1, 2]:
-        pos = mejor_libre_en_lista(ZONA_NEUTRA, x_est, y_est)
-        if pos:
-            log(f"🟡 Zona neutra -> celda {pos}")
-            return pos
+    if indice == 1:
+        # ÍNDICE 1: puede ir a su zona, otras zonas, neutra, baja
+        # Su propia zona frecuente (si puede)
+        if puede_ir_a_zona_frecuente(estacion_origen, color_caja):
+            zonas_a_considerar.append(ZONAS_FRECUENTES[estacion_origen])
+        
+        # Otras zonas frecuentes (si mismo color)
+        for zona_id, celdas in ZONAS_FRECUENTES.items():
+            if zona_id != estacion_origen and puede_ir_a_zona_frecuente(zona_id, color_caja):
+                zonas_a_considerar.append(celdas)
+        
+        # Zona neutra y baja
+        zonas_a_considerar.append(ZONA_NEUTRA)
+        zonas_a_considerar.append(ZONA_BAJA)
+        
+    elif indice == 2:
+        # ÍNDICE 2: NO puede ir a su zona, sí a otras, sí a neutra, sí a baja
+        # Otras zonas frecuentes (si mismo color)
+        for zona_id, celdas in ZONAS_FRECUENTES.items():
+            if zona_id != estacion_origen and puede_ir_a_zona_frecuente(zona_id, color_caja):
+                zonas_a_considerar.append(celdas)
+        
+        # Zona neutra y baja
+        zonas_a_considerar.append(ZONA_NEUTRA)
+        zonas_a_considerar.append(ZONA_BAJA)
+        
+    else:  # indice == 3
+        # ÍNDICE 3: NO puede ir a su zona, sí a otras, NO a neutra, sí a baja
+        # Otras zonas frecuentes (si mismo color)
+        for zona_id, celdas in ZONAS_FRECUENTES.items():
+            if zona_id != estacion_origen and puede_ir_a_zona_frecuente(zona_id, color_caja):
+                zonas_a_considerar.append(celdas)
+        
+        # Solo zona baja
+        zonas_a_considerar.append(ZONA_BAJA)
     
-    # ===== 5. ZONA BAJA (todos) =====
-    pos = mejor_libre_en_lista(ZONA_BAJA, x_est, y_est)
-    if pos:
-        log(f"⬇ Zona baja -> celda {pos}")
-        return pos
+    # ===== BUSCAR CELDA MÁS CERCANA ENTRE ZONAS PERMITIDAS =====
+    mejor_pos = None
+    mejor_dist = float('inf')
     
-    # ===== SIN ESPACIO =====
-    log(f"SIN ESPACIO para color {color_caja} (índice {indice})")
+    for zona in zonas_a_considerar:
+        for pos_celda in zona:
+            if estado_logico[pos_celda-1] == 0:  # Celda libre
+                dist = distancia_mm_pos(pos_celda, x_est, y_est)
+                if dist < mejor_dist:
+                    mejor_dist = dist
+                    mejor_pos = pos_celda
+    
+    if mejor_pos:
+        # Identificar en qué zona se encontró
+        if mejor_pos in ZONA_BAJA:
+            zona_tipo = "BAJA"
+        elif mejor_pos in ZONA_NEUTRA:
+            zona_tipo = "NEUTRA"
+        else:
+            # Encontrar en qué zona frecuente
+            for zona_id, celdas in ZONAS_FRECUENTES.items():
+                if mejor_pos in celdas:
+                    zona_tipo = f"FRECUENTE {zona_id}"
+                    break
+            else:
+                zona_tipo = "DESCONOCIDA"
+        
+        log(f"Frecuencia -> {zona_tipo} -> celda {mejor_pos} (distancia: {mejor_dist:.1f}mm)")
+        return mejor_pos
+    
+    # Si no encontró espacio
+    log(f"Frecuencia -> SIN ESPACIO para color {color_caja} (índice {indice})")
     return None
 
-# ================= FUNCIÓN UNIFICADA CON THREAD SAFETY =================
+
+# ================= FUNCIÓN UNIFICADA =================
 def movimiento_auto(estacion, accion, color_sel=None):
-    if not ocupado_lock.acquire(blocking=False):
-        log("⚠ Sistema ocupado, intente más tarde")
+    global ocupado
+    if ocupado:
         return
-    
-    try:
-        if accion == "carga":
-            ciclo_carga(estacion)
-        elif accion == "descarga":
-            pos = buscar_caja_mas_cercana(color_sel, pos_actual_x, pos_actual_y)
-            if pos:
-                ciclo_descarga(estacion, color_sel)
-            else:
-                log("No hay cajas de ese color")
-    except Exception as e:
-        log(f"Error en movimiento_auto: {e}")
-    finally:
-        ocupado_lock.release()
+    ocupado = True
+
+    if accion == "carga":
+        ciclo_carga(estacion)
+
+    elif accion == "descarga":
+
+        # buscar la caja MÁS CERCANA del color elegido
+        pos = buscar_caja_mas_cercana(  color_sel,
+                                        pos_actual_x,
+                                        pos_actual_y)
+
+        if pos:
+            ciclo_descarga(estacion, color_sel)
+
+        else:
+            log("No hay cajas de ese color")
+    ocupado = False
 
 # ================= HMI ==================
 # ========================================
@@ -773,6 +860,7 @@ COLUMNAS = 10
 celdas_ui = []
 
 def crear_grid(parent):
+    """Crea el grid de 5x10 celdas"""
     for r in range(FILAS):
         for c in range(COLUMNAS):
             lbl = tk.Label(
@@ -787,6 +875,7 @@ def crear_grid(parent):
             celdas_ui.append(lbl)
 
 def color_celda(v):
+    """Retorna color según estado lógico"""
     colores = {
         0: "gray",
         1: "red",
@@ -797,6 +886,7 @@ def color_celda(v):
     return colores.get(v, "black")
 
 def zona_por_pos(pos):
+    """Calcula zona (1-5) según posición de celda"""
     col = (pos - 1) % ESPACIOS_X
     return (col // 2) + 1
 
@@ -825,8 +915,9 @@ def actualizar_variables_tiempo_real():
     d = sum(1 for v in estado_logico if v == 4)
     lbl_por_color.config(text=f"Rojo:{r} Verde:{v} Azul:{a} Desc:{d}")
     
-    lbl_tiempo_ciclo.config(text="0.0s")
-    lbl_distancia.config(text="0.0m")
+    # Actualizar tiempo ciclo y distancia (valores de ejemplo)
+    lbl_tiempo_ciclo.config(text=f"0.0s")
+    lbl_distancia.config(text=f"0.0m")
     
     root.after(1000, actualizar_variables_tiempo_real)
 
@@ -934,14 +1025,14 @@ def listar_puertos():
         log(f"Error al listar puertos: {e}")
 
 def conectar_serial():
-    global puerto, hilo_serial_activo
+    global puerto
     try:
         puerto_sel = combo_puertos.get()
         if not puerto_sel:
             log("Seleccione un puerto")
             return
             
-        puerto = serial.Serial(puerto_sel, 115200, timeout=0.5)
+        puerto = serial.Serial(puerto_sel, 115200, timeout=1)
         time.sleep(2)
         
         if puerto.is_open:
@@ -950,12 +1041,7 @@ def conectar_serial():
             btn_actualizar_puertos.config(state="disabled")
             actualizar_estado_sistema("CONECTADO", "green")
             log(f"Conectado a {puerto_sel}")
-            
-            hilo_serial_activo = True
-            threading.Thread(target=procesar_cola_serial, daemon=True).start()
-            
             iniciar_monitoreo_estado()
-            verificar_sensores()
         else:
             log("No se pudo abrir el puerto")
     except Exception as e:
@@ -964,8 +1050,7 @@ def conectar_serial():
         log(f"Error conexión: {e}")
 
 def desconectar_serial():
-    global puerto, hilo_serial_activo
-    hilo_serial_activo = False
+    global puerto
     if puerto:
         try:
             puerto.close()
@@ -994,24 +1079,23 @@ def actualizar_estado_sistema(estado, color="green", mensaje=""):
 
 def iniciar_monitoreo_estado():
     def monitor():
-        while puerto and puerto.is_open and hilo_serial_activo:
+        while puerto and puerto.is_open:
             try:
                 if puerto.in_waiting > 0:
-                    with serial_lock:
-                        linea = puerto.readline().decode().strip()
+                    linea = puerto.readline().decode().strip()
                     if linea:
                         if "HOME" in linea or "home" in linea:
-                            root.after(0, lambda: actualizar_estado_sistema("HOMING", "blue"))
+                            actualizar_estado_sistema("HOMING", "blue")
                         elif "ACK" in linea:
-                            root.after(0, lambda: actualizar_estado_sistema("EJECUTANDO", "orange"))
+                            actualizar_estado_sistema("EJECUTANDO", "orange")
                         elif "ERROR" in linea or "error" in linea:
-                            root.after(0, lambda: actualizar_estado_sistema("ERROR", "red", linea))
+                            actualizar_estado_sistema("ERROR", "red", linea)
                 
                 if estado_sistema["estado"] not in ["DESCONECTADO", "ERROR"]:
                     if estado_sistema["timestamp"]:
                         delta = datetime.datetime.now() - estado_sistema["timestamp"]
                         if delta.seconds > 2:
-                            root.after(0, lambda: actualizar_estado_sistema("LISTO", "green"))
+                            actualizar_estado_sistema("LISTO", "green")
             except:
                 pass
             time.sleep(0.5)
@@ -1022,36 +1106,15 @@ def set_estado(ok):
         actualizar_estado_sistema("EJECUTADO", "green")
     else:
         actualizar_estado_sistema("EN ESPERA", "red")
-
+        
 # ====================================================
-# ========= FUNCIONES DE PAUSA/DETENER ==============
+# ========= FUNCIÓN DE EJECUTAR LISTA - ORIGINAL =====
 # ====================================================
 
 ejecucion_en_curso = False
-pausado = False
-
-def pausar_ejecucion():
-    global pausado
-    if ejecucion_en_curso:
-        pausado = not pausado
-        if pausado:
-            btn_pausar.config(text="REANUDAR", bg="#FFC107", fg="black")
-            log("⏸ Ejecución pausada")
-        else:
-            btn_pausar.config(text="PAUSAR", bg="#FFC107", fg="black")
-            log("▶ Ejecución reanudada")
-
-def detener_ejecucion():
-    global ejecucion_en_curso, pausado
-    if ejecucion_en_curso:
-        ejecucion_en_curso = False
-        pausado = False
-        btn_pausar.config(text="PAUSAR", bg="#FFC107", fg="black", state="disabled")
-        btn_detener.config(state="disabled")
-        log("⏹ Ejecución detenida")
 
 def ejecutar_lista():
-    global ejecucion_en_curso, pausado
+    global ejecucion_en_curso
     
     if not lista_instrucciones:
         log("No hay instrucciones para ejecutar")
@@ -1061,38 +1124,29 @@ def ejecutar_lista():
         log("Ya hay una ejecución en curso")
         return
     
-    def procesar_instruccion(indice):
-        global ejecucion_en_curso, pausado
+    def worker():
+        global ejecucion_en_curso
+        ejecucion_en_curso = True
         
-        if not ejecucion_en_curso or indice >= len(lista_instrucciones):
-            ejecucion_en_curso = False
-            btn_pausar.config(state="disabled")
-            btn_detener.config(state="disabled")
-            log("Lista completada")
-            return
+        for i, (tipo, est, col) in enumerate(lista_instrucciones):
+            if not ejecucion_en_curso:
+                break
+                
+            try:
+                if tipo == "carga":
+                    ciclo_carga(est)
+                else:
+                    ciclo_descarga(est, col)
+                log(f"Instrucción {i+1}/{len(lista_instrucciones)} completada")
+            except Exception as e:
+                log(f"Error en instrucción {i+1}: {e}")
+                break
         
-        if pausado:
-            root.after(100, lambda: procesar_instruccion(indice))
-            return
-        
-        tipo, est, col = lista_instrucciones[indice]
-        
-        try:
-            if tipo == "carga":
-                ciclo_carga(est)
-            else:
-                ciclo_descarga(est, col)
-            log(f"Instrucción {indice+1}/{len(lista_instrucciones)} completada")
-            root.after(100, lambda: procesar_instruccion(indice + 1))
-        except Exception as e:
-            log(f"Error en instrucción {indice+1}: {e}")
-            ejecucion_en_curso = False
+        ejecucion_en_curso = False
+        log("Lista completada")
     
-    ejecucion_en_curso = True
-    btn_pausar.config(state="normal")
-    btn_detener.config(state="normal")
+    threading.Thread(target=worker, daemon=True).start()
     log(f"Ejecutando lista de {len(lista_instrucciones)} instrucciones...")
-    root.after(100, lambda: procesar_instruccion(0))
 
 # ====================================================
 # ========= CREAR WIDGETS - DISTRIBUCIÓN EXACTA =====
@@ -1145,8 +1199,10 @@ frame_estado_inner.pack()
 lbl_estado = tk.Label(frame_estado_inner, text="DESCONECTADO", bg="red", fg="white", width=16, font=("Arial", 9, "bold"))
 lbl_estado.grid(row=1, column=0, padx=2)
 
+# FILA 2: Label "Hora:"
 tk.Label(frame_estado_inner, text="Hora:", font=("Arial", 9, "bold")).grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
 
+# FILA 3: Tiempo (reloj)
 lbl_tiempo = tk.Label(frame_estado_inner, text="", font=("Arial", 9, "bold"))
 lbl_tiempo.grid(row=0, column=1, sticky="w", padx=2, pady=2)
 
@@ -1154,26 +1210,32 @@ lbl_tiempo.grid(row=0, column=1, sticky="w", padx=2, pady=2)
 frame_variables_top = tk.LabelFrame(frame_fila1, text="VARIABLES DEL SISTEMA", padx=8, pady=5, font=("Arial", 9, "bold"))
 frame_variables_top.pack(side="left", padx=2, fill="both", expand=True)
 
+# Frame contenedor centrado
 frame_centrado = tk.Frame(frame_variables_top)
-frame_centrado.place(relx=0.5, rely=0.5, anchor="center")
+frame_centrado.place(relx=0.5, rely=0.5, anchor="center")  # CENTRADO PERFECTO
 
-frame_centrado.grid_columnconfigure(0, weight=0)
-frame_centrado.grid_columnconfigure(1, weight=0)
+# Configurar grid 2x2
+frame_centrado.grid_columnconfigure(0, weight=0)  # Label - tamaño fijo
+frame_centrado.grid_columnconfigure(1, weight=0)  # Valor - tamaño fijo
 frame_centrado.grid_rowconfigure(0, weight=0)
 frame_centrado.grid_rowconfigure(1, weight=0)
 
+# FILA 0, COLUMNA 0 - Tiempo
 tk.Label(frame_centrado, text="Tiempo encendido:", font=("Arial", 8, "bold")).grid(row=0, column=0, sticky="e", padx=5, pady=2)
 lbl_tiempo_simulacion = tk.Label(frame_centrado, text="00:00:00", font=("Arial", 8))
 lbl_tiempo_simulacion.grid(row=0, column=1, sticky="w", padx=5, pady=2)
 
+# FILA 0, COLUMNA 2 - Ocupación (usamos column=2 para separar)
 tk.Label(frame_centrado, text="Ocupación:", font=("Arial", 8, "bold")).grid(row=0, column=2, sticky="e", padx=15, pady=2)
 lbl_ocupacion = tk.Label(frame_centrado, text="0% (0/50)", font=("Arial", 8))
 lbl_ocupacion.grid(row=0, column=3, sticky="w", padx=5, pady=2)
 
+# FILA 1, COLUMNA 0 - Cajas
 tk.Label(frame_centrado, text="Cajas:", font=("Arial", 8, "bold")).grid(row=1, column=0, sticky="e", padx=5, pady=2)
 lbl_por_color = tk.Label(frame_centrado, text="R0 V0 A0 D0", font=("Arial", 8))
 lbl_por_color.grid(row=1, column=1, sticky="w", padx=5, pady=2)
 
+# FILA 1, COLUMNA 2 - Tiempo ciclo
 tk.Label(frame_centrado, text="Tiempo ciclo:", font=("Arial", 8, "bold")).grid(row=1, column=2, sticky="e", padx=15, pady=2)
 lbl_tiempo_ciclo = tk.Label(frame_centrado, text="0.0s", font=("Arial", 8))
 lbl_tiempo_ciclo.grid(row=1, column=3, sticky="w", padx=5, pady=2)
@@ -1182,10 +1244,11 @@ lbl_tiempo_ciclo.grid(row=1, column=3, sticky="w", padx=5, pady=2)
 frame_fila2 = tk.Frame(frame_principal)
 frame_fila2.pack(fill="x", pady=2)
 
-# Columna 1-3: ALGORITMO ELEGIDO
+# Columna 1-3: ALGORITMO ELEGIDO (ocupa 3 columnas)
 frame_algoritmo_elegido = tk.LabelFrame(frame_fila2, text="ALGORITMO ELEGIDO", padx=8, pady=5, font=("Arial", 9, "bold"))
 frame_algoritmo_elegido.pack(side="left", padx=2, fill="both", expand=True)
 
+# PANEL ALGORITMO DINÁMICO
 frame_panel_algoritmo = tk.Frame(frame_algoritmo_elegido)
 frame_panel_algoritmo.pack(fill="both", expand=True, padx=5, pady=5)
 
@@ -1199,12 +1262,6 @@ frame_acciones.pack(fill="x", pady=(0,2))
 
 btn_ejecutar = tk.Button(frame_acciones, text="EJECUTAR", bg="#4CAF50", fg="white", width=10, font=("Arial", 8, "bold"))
 btn_ejecutar.pack(side="left", padx=2)
-
-btn_pausar = tk.Button(frame_acciones, text="PAUSAR", bg="#FFC107", fg="black", width=10, font=("Arial", 8, "bold"), state="disabled")
-btn_pausar.pack(side="left", padx=2)
-
-btn_detener = tk.Button(frame_acciones, text="DETENER", bg="#F44336", fg="white", width=10, font=("Arial", 8, "bold"), state="disabled")
-btn_detener.pack(side="left", padx=2)
 
 btn_home = tk.Button(frame_acciones, text="HOME", bg="#2196F3", fg="white", width=10, font=("Arial", 8, "bold"))
 btn_home.pack(side="left", padx=2)
@@ -1220,10 +1277,11 @@ lbl_distancia.pack(side="left", padx=10)
 frame_fila3 = tk.Frame(frame_principal)
 frame_fila3.pack(fill="both", expand=True, pady=2)
 
-# Columna 1-3: GRID + LEYENDAS
+# Columna 1-3: GRID + LEYENDAS (en una sola fila abajo)
 frame_grid_container = tk.LabelFrame(frame_fila3, text="ALMACÉN - 50 CELDAS", padx=10, pady=10, font=("Arial", 10, "bold"))
 frame_grid_container.pack(side="left", padx=2, fill="both", expand=True)
 
+# Grid centrado
 frame_grid_centrado = tk.Frame(frame_grid_container)
 frame_grid_centrado.pack(expand=True)
 
@@ -1235,7 +1293,7 @@ frame_grid_celdas.pack()
 
 crear_grid(frame_grid_celdas)
 
-# LEYENDAS DEL GRID - UNA SOLA FILA
+# LEYENDAS DEL GRID - UNA SOLA FILA EN LA PARTE INFERIOR IZQUIERDA
 frame_leyendas_container = tk.Frame(frame_grid_container)
 frame_leyendas_container.pack(side="bottom", anchor="sw", pady=10)
 
@@ -1244,15 +1302,15 @@ frame_leyendas.pack()
 
 leyendas = [
     ("Celda vacía", "gray", "black"),
-    ("Caja color rojo", "red", "white"),
-    ("Caja color verde", "green", "white"),
-    ("Caja color azul", "blue", "white"),
+    ("Caja color rojo", "red", "black"),
+    ("Caja color verde", "green", "black"),
+    ("Caja color azul", "blue", "black"),
     ("Caja color desconocido", "yellow", "black")
 ]
 
 for i, (texto, bg_color, fg_color) in enumerate(leyendas):
     lbl = tk.Label(frame_leyendas, text=texto, bg=bg_color, fg=fg_color,
-                  width=20, font=("Arial", 7, "bold"), anchor="center", padx=1)
+                  width=25, font=("Arial", 8, "bold"), anchor="center", padx=2)
     lbl.grid(row=0, column=i, padx=1, pady=1)
 
 # Columna 4: LISTA INSTRUCCIONES + REGISTRO EVENTOS
@@ -1487,9 +1545,8 @@ btn_zona.config(command=cambiar_algoritmo)
 btn_producto.config(command=cambiar_algoritmo)
 btn_frecuencia.config(command=cambiar_algoritmo)
 
+# ✅ SOLO EJECUTAR - SIN PAUSAR/DETENER
 btn_ejecutar.config(command=ejecutar_lista)
-btn_pausar.config(command=pausar_ejecucion)
-btn_detener.config(command=detener_ejecucion)
 btn_home.config(command=lambda: enviar_comando(HOME) if puerto else log("No conectado"))
 
 btn_limpiar_lista.config(command=lambda: [lista_instrucciones.clear(), 
@@ -1517,8 +1574,6 @@ actualizar_tiempo_simulacion()
 actualizar_variables_tiempo_real()
 actualizar_grid()
 actualizar_panel_algoritmo()
-
-hilo_serial_activo = False
 
 log("Sistema HMI iniciado")
 log("Esperando conexión serial...")

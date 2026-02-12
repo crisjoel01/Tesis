@@ -45,34 +45,16 @@ int op = 0;
 // Variables TCA9548A
 Adafruit_TCS34725 tcs(TCS34725_INTEGRATIONTIME_154MS, TCS34725_GAIN_4X);
 
-
-const float ref[3][3][3] = {
-  // -------- Estación 1 --------
-  {
-    {0.738, 0.329, 0.302},  // rojo
-    {0.472, 0.502, 0.354},  // verde
-    {0.492, 0.478, 0.458}   // azul
-  },
-
-  // -------- Estación 2 --------
-  {
-    {0.670, 0.322, 0.268},  // rojo
-    {0.383, 0.448, 0.274},  // verde
-    {0.431, 0.447, 0.418}   // azul
-  },
-
-  // -------- Estación 3 --------
-  {
-    {0.715, 0.408, 0.378},  // rojo
-    {0.491, 0.504, 0.381},  // verde
-    {0.531, 0.501, 0.482}   // azul
-  }
-};
-
 byte color = 0;
 byte comando = 42;
 byte recibido = 0;
 byte presencia[50];
+
+const byte TCA_CANAL[3] = {
+  2,  // estación 1 -> SD2/SC2
+  1,  // estación 2 -> SD1/SC1
+  0   // estación 3 -> SD0/SC0
+};
 
 void setup() {
   Wire.begin();
@@ -254,8 +236,10 @@ void enviarPresenciaSerial()
 }
 
 // Funciones TCA9548A
-void tcaSelect(uint8_t canal)
+void tcaSelect(uint8_t estacion)
 {
+  uint8_t canal = TCA_CANAL[estacion];
+
   Wire.beginTransmission(TCA_ADDR);
   Wire.write(1 << canal);
   Wire.endTransmission();
@@ -279,8 +263,7 @@ float calcularDistancia(float r1, float g1, float b1, float r2, float g2, float 
 
 void leerRGB(byte est, float &rN, float &gN, float &bN)
 {
-  uint8_t canal = est;
-  tcaSelect(canal);
+  tcaSelect(est);
   if (!initSensor())
   {
     Serial.print("E"); Serial.print(est+1); 
@@ -321,88 +304,36 @@ void leerRGB(byte est, float &rN, float &gN, float &bN)
 
 byte clasificarE1(float rN, float gN, float bN)
 {
-  // =========================
-  // ROJO
-  // r muy dominante
-  // =========================
-  if(rN > gN + 0.15 &&
-     rN > bN + 0.15)
-  {
+  if(rN > gN + 0.10 && rN > bN + 0.10)
     return 1;
-  }
 
-  // =========================
-  // VERDE
-  // g dominante claro y b bajo
-  // =========================
-  if(gN > rN + 0.04 &&
-     gN > bN + 0.12 &&
-     bN < 0.33)
-  {
+  if(gN > rN + 0.02 && gN > bN + 0.08 && bN < 0.40)
     return 2;
-  }
 
   return 3;
 }
-
-
 
 byte clasificarE2(float rN, float gN, float bN)
 {
-  // =========================
-  // ROJO
-  // r dominante fuerte
-  // =========================
-  if(rN > gN + 0.12 &&
-     rN > bN + 0.12)
-  {
+  if(rN > gN + 0.11 && rN > bN + 0.11)
     return 1;
-  }
 
-  // =========================
-  // VERDE
-  // g dominante claro y b bajo
-  // =========================
-  if(gN > rN + 0.05 &&
-     gN > bN + 0.12 &&
-     bN < 0.32)
-  {
+  if(gN > rN + 0.04 && gN > bN + 0.10 && bN < 0.35)
     return 2;
-  }
 
   return 3;
 }
-
-
 
 byte clasificarE3(float rN, float gN, float bN)
 {
-  // =========================
-  // ROJO
-  // r dominante fuerte
-  // =========================
-  if(rN > gN + 0.15 &&
-     rN > bN + 0.15)
-  {
+  if(rN > gN + 0.13 && rN > bN + 0.13)
     return 1;
-  }
 
-  // =========================
-  // VERDE
-  // g dominante claro y b bajo
-  // =========================
-  if(gN > rN + 0.04 &&
-     gN > bN + 0.12 &&
-     bN < 0.33)
-  {
+  if(gN > rN + 0.03 && gN > bN + 0.10 && bN < 0.36)
     return 2;
-  }
 
   return 3;
 }
-
-
-
 
 byte clasificarPorEstacion(byte est, float rN, float gN, float bN)
 {
