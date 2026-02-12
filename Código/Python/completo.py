@@ -43,9 +43,9 @@ DY_MM = 156
 Y_INICIAL_MM = 235
 X_INICIAL_MM = 15
 Y_ESTACION_MM = {
-    3: 54,
-    2: 54,
-    1: 57
+    1: 52,
+    2: 52,
+    3: 57
 }
 
 X_ESTACIONES_MM = {
@@ -108,7 +108,7 @@ zona_frecuente_color = {
 ZONAS_FRECUENTES = {
     3: [8,9,10,18,19,20],
     2: [4,5,6,14,15,16],
-    2: [1,2,3,11,12,13]
+    1: [1,2,3,11,12,13]
 }
 
 ZONA_NEUTRA = [7,17] + list(range(21,31))
