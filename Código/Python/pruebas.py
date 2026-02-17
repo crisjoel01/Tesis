@@ -10,6 +10,9 @@ from tkinter import ttk
 combo_puertos = ttk.Combobox
 from tkinter import messagebox
 import random
+import json
+import os
+
 
 print(sys.executable)
 
@@ -40,15 +43,15 @@ DY_MM = 156
 Y_INICIAL_MM = 235
 X_INICIAL_MM = 15
 Y_ESTACION_MM = {
-    3: 50,
-    2: 50,
-    1: 57
+    1: 52,
+    2: 52,
+    3: 57
 }
 
 X_ESTACIONES_MM = {
-    3: 163,
+    1: 163,
     2: 165 + 465,
-    1: 170 + 465 + 610
+    3: 170 + 465 + 610
 }
 
 ALTURAS_MM = [160, 155, 157.5, 155, 155]
@@ -59,6 +62,8 @@ ocupado = False
 
 lista_instrucciones = []
 
+# ================= GUARDAR DATOS =================
+ARCHIVO_ESTADO = "estado_simulacion.json"
 
 # ================= POSICIÓN ACTUAL DEL CARRO =================
 pos_actual_x = 0
@@ -92,28 +97,68 @@ historial = {
 }
 
 # color dominante actual por estación (etiqueta dinámica)
-zona_frecuente_color = {
-    1: None,
-    2: None,
-    3: None
+indices_estacion = {
+    1: {1: None, 2: None, 3: None},  # E1: {índice: color}
+    2: {1: None, 2: None, 3: None},  # E2
+    3: {1: None, 2: None, 3: None}   # E3
 }
 
-ranking_colores = {
-    1: {1: 1, 2: 2, 3: 3},  # Inicial: Rojo=1, Verde=2, Azul=3
-    2: {1: 1, 2: 2, 3: 3},
-    3: {1: 1, 2: 2, 3: 3}
-}
 
 # ====== zonas físicas ======
 ZONAS_FRECUENTES = {
-    1: [8,9,10,18,19,20],
+    3: [8,9,10,18,19,20],
     2: [4,5,6,14,15,16],
-    3: [1,2,3,11,12,13]
+    1: [1,2,3,11,12,13]
 }
 
 ZONA_NEUTRA = [7,17] + list(range(21,31))
-ZONA_BAJA   = list(range(31,51))
+ZONA_MENOS_FRECUENTE   = list(range(31,51))
 
+# ====== guardar estado ======
+def guardar_estado():
+
+    data = {
+        "presencia": presencia,
+        "color": color,
+        "estado_logico": estado_logico,
+        "lista_instrucciones": lista_instrucciones,
+        "indices_estacion": indices_estacion,
+        "historial": {k: list(v) for k, v in historial.items()}
+    }
+
+    with open(ARCHIVO_ESTADO, "w") as f:
+        json.dump(data, f)
+
+    log("💾 Estado guardado")
+
+def cargar_estado():
+
+    global lista_instrucciones
+    global indices_estacion, historial
+
+    if not os.path.exists(ARCHIVO_ESTADO):
+        return
+
+    with open(ARCHIVO_ESTADO, "r") as f:
+        data = json.load(f)
+
+    presencia[:] = data["presencia"]
+    color[:] = data["color"]
+    estado_logico[:] = data["estado_logico"]
+
+    lista_instrucciones[:] = [tuple(x) for x in data["lista_instrucciones"]]
+
+    if "indices_estacion" in data:
+        for k, v in data["indices_estacion"].items():
+            indices_estacion[int(k)] = v
+
+    for k, v in data["historial"].items():
+        historial[int(k)] = deque(v, maxlen=HIST_N)
+
+    actualizar_grid()
+    actualizar_textbox_instrucciones()
+
+    log("📂 Estado restaurado")
 
 # ================= SERIAL =================
 puerto = None
@@ -132,6 +177,7 @@ def actualizar_estado_logico():
 
         elif presencia[i] == 1 and color[i] in (1, 2, 3):
             estado_logico[i] = color[i]
+
         else:
             estado_logico[i] = 4
 
@@ -348,25 +394,6 @@ def ciclo_carga(estacion):
         log("Color no detectado")
         color_detectado = 4
     
-    if color_detectado in (1, 2, 3):
-        # Verificar si el storage está completamente vacío
-        storage_vacio = all(p == 0 for p in presencia)
-        
-        if storage_vacio:
-            # Primera carga en storage vacío
-            # Este color será índice 1 en su estación
-            ranking_colores[estacion][color_detectado] = 1
-            
-            # Los otros dos colores serán índice 2 y 3 (orden inicial)
-            otros_colores = [c for c in [1, 2, 3] if c != color_detectado]
-            ranking_colores[estacion][otros_colores[0]] = 2
-            ranking_colores[estacion][otros_colores[1]] = 3
-            
-            # Actualizar zona_frecuente_color para compatibilidad
-            zona_frecuente_color[estacion] = color_detectado
-            
-            log(f"INICIALIZACIÓN: Estación {estacion} - {color_detectado}=índice1")
-    
     posicion = elegir_posicion(color_detectado, estacion)
 
     if posicion is None:
@@ -438,7 +465,7 @@ def elegir_posicion(color_detectado, estacion):
         return buscar_por_producto(color_detectado, pos_actual_x, pos_actual_y)
 
     elif ALGORITMO_ACTUAL == "frecuencia":
-        return buscar_por_frecuencia(estacion, color_detectado)
+        return buscar_por_frecuencia(estacion, color_detectado, pos_actual_x, pos_actual_y)
 
     else:
         return None
@@ -548,6 +575,20 @@ def contar_color_en_zona(celdas, color_obj):
             c += 1
     return c
 
+def obtener_indice_color(estacion, color):
+    """
+    Devuelve el índice (1, 2, 3) del color en la estación
+    1 = más frecuente, 2 = medio, 3 = menos frecuente
+    None = sin asignar
+    """
+    for idx, col in indices_estacion[estacion].items():
+        if col == color:
+            return idx
+    return None
+
+def obtener_color_indice(estacion, indice):
+    """Devuelve el color que tiene ese índice en la estación"""
+    return indices_estacion[estacion].get(indice)
 
 def mejor_libre_en_lista(celdas, x0, y0):
     mejor = None
@@ -562,6 +603,27 @@ def mejor_libre_en_lista(celdas, x0, y0):
 
     return mejor
 
+def buscar_mas_cercana_en_zonas(lista_zonas, x0, y0):
+    """
+    Busca la celda vacía más cercana entre todas las zonas de la lista
+    lista_zonas: [[celdas_zona1], [celdas_zona2], ...]
+    """
+    mejor_pos = None
+    mejor_dist = 1e9
+    
+    # Combinar todas las celdas
+    todas_celdas = []
+    for zona in lista_zonas:
+        todas_celdas.extend(zona)
+    
+    for pos in todas_celdas:
+        if estado_logico[pos - 1] == 0:  # Vacía
+            dist = distancia_mm_pos(pos, x0, y0)
+            if dist < mejor_dist:
+                mejor_dist = dist
+                mejor_pos = pos
+    
+    return mejor_pos
 
 # Ranking + bootstrap + histéresis
 def calcular_ranking_estacion(est):
@@ -590,204 +652,220 @@ def calcular_ranking_estacion(est):
     ranking = sorted(conteo, key=lambda x: conteo[x], reverse=True)
     return ranking
 
-# Verificar si una caja puede ir a una zona frecuente
-def puede_ir_a_zona_frecuente(zona_estacion, color_caja):
+def actualizar_indices_estacion(est):
     """
-    Verifica si una caja de 'color_caja' puede ir a zona frecuente 'zona_estacion'
-    Regla: Cada zona frecuente solo acepta su color índice 1
+    Actualiza los índices 1, 2, 3 según el historial de descargas
+    con bootstrap e histéresis
     """
-    # Obtener color líder de esta zona (índice 1)
-    color_lider = None
-    for color_id, indice in ranking_colores[zona_estacion].items():
-        if indice == 1:
-            color_lider = color_id
-            break
+    hist = historial[est]
     
-    # Si no hay líder asignado, no acepta nada
-    if color_lider is None:
-        return False
-    
-    # La caja debe ser del MISMO color que el líder de la zona
-    return color_caja == color_lider
-
-# Obtener índice de un color para una estación =====
-def obtener_indice_color(estacion, color_caja):
-    """Retorna el índice (1,2,3) de un color para una estación"""
-    return ranking_colores[estacion].get(color_caja, 3)
-
-def actualizar_frecuencia(estacion, color_descargado):
-    """
-    Actualiza historial y recalcula índices basado en DESCARGAS
-    Mantiene compatibilidad con la función original pero añade ranking completo
-    """
-    # 1. Guardar en historial (solo descargas)
-    historial[estacion].append(color_descargado)
-    
-    # 2. Recalcular índices basado en historial de DESCARGAS
-    actualizar_indices_por_descargas(estacion)
-    
-    log(f"Frecuencia actualizada - Estación {estacion} descargó {color_descargado}")
-
-def actualizar_indices_por_descargas(estacion):
-    """
-    Recalcula índices 1,2,3 basado en historial de descargas
-    """
-    hist = list(historial[estacion])  # Últimas 20 descargas
-    
-    if len(hist) < 1:
-        return  # No hay suficientes datos
-    
-    # Contar frecuencia de descargas
-    conteo = {1: 0, 2: 0, 3: 0}
-    for color_desc in hist:
-        conteo[color_desc] += 1
-    
-    # Ordenar colores por frecuencia (más frecuente primero)
-    colores_ordenados = sorted(conteo.items(), key=lambda x: x[1], reverse=True)
-    
-    # Asignar nuevos índices
-    # Índice 1 = más frecuente, Índice 3 = menos frecuente
-    for idx, (color_id, _) in enumerate(colores_ordenados):
-        ranking_colores[estacion][color_id] = idx + 1
-    
-    # Asignar índices a colores que no aparecieron en historial
-    for color_id in [1, 2, 3]:
-        if color_id not in [c for c, _ in colores_ordenados]:
-            ranking_colores[estacion][color_id] = 3  # Menor prioridad
-    
-    # Actualizar color líder para zona frecuente (compatibilidad)
-    if colores_ordenados:
-        nuevo_lider = colores_ordenados[0][0]
+    # BOOTSTRAP: primeras descargas
+    if len(hist) < 3:
+        orden = []
+        for c in hist:
+            if c not in orden:
+                orden.append(c)
         
-        # Verificar histéresis si hay líder anterior
-        lider_actual = zona_frecuente_color[estacion]
-        if lider_actual is None:
-            zona_frecuente_color[estacion] = nuevo_lider
-        elif lider_actual != nuevo_lider:
-            if conteo[nuevo_lider] >= conteo[lider_actual] + HISTERESIS:
-                zona_frecuente_color[estacion] = nuevo_lider
-                log(f"Estación {estacion}: nuevo líder {nuevo_lider} (histéresis)")
+        # Completar con colores faltantes
+        for c in (1, 2, 3):
+            if c not in orden:
+                orden.append(c)
+        
+        # Asignar índices
+        for idx, color in enumerate(orden[:3], start=1):
+            indices_estacion[est][idx] = color
+        
+        log(f"📊 E{est} Bootstrap → 1:{orden[0]} 2:{orden[1]} 3:{orden[2]}")
+        return
     
-    # Log de cambios
-    log(f"Estación {estacion} índices: Rojo={ranking_colores[estacion][1]}, Verde={ranking_colores[estacion][2]}, Azul={ranking_colores[estacion][3]}")
+    # CONTEO NORMAL
+    conteo = {1: 0, 2: 0, 3: 0}
+    for c in hist:
+        conteo[c] += 1
+    
+    # Ordenar por frecuencia (mayor a menor)
+    ranking = sorted(conteo.items(), key=lambda x: x[1], reverse=True)
+    nuevo_orden = [color for color, count in ranking]
+    
+    # Estado actual
+    actual_idx1 = indices_estacion[est][1]
+    actual_idx2 = indices_estacion[est][2]
+    actual_idx3 = indices_estacion[est][3]
+    
+    nuevo_idx1 = nuevo_orden[0]
+    nuevo_idx2 = nuevo_orden[1]
+    nuevo_idx3 = nuevo_orden[2]
+    
+    # HISTÉRESIS: solo cambiar si diferencia >= HISTERESIS
+    cambio = False
+    
+    if actual_idx1 != nuevo_idx1:
+        if conteo[nuevo_idx1] >= conteo[actual_idx1] + HISTERESIS:
+            indices_estacion[est][1] = nuevo_idx1
+            cambio = True
+    
+    if actual_idx2 != nuevo_idx2:
+        if conteo[nuevo_idx2] >= conteo[actual_idx2] + HISTERESIS:
+            indices_estacion[est][2] = nuevo_idx2
+            cambio = True
+    
+    if actual_idx3 != nuevo_idx3:
+        if conteo[nuevo_idx3] >= conteo[actual_idx3] + HISTERESIS:
+            indices_estacion[est][3] = nuevo_idx3
+            cambio = True
+    
+    if cambio:
+        log(f"🔄 E{est} Índices actualizados → 1:{indices_estacion[est][1]} "
+            f"2:{indices_estacion[est][2]} 3:{indices_estacion[est][3]}")
 
-def buscar_celda_mas_cercana_en_zonas(zonas_lista, x_ref, y_ref):
+def zonas_necesitan_min_causas(color):
     """
-    Busca la celda libre más cercana en una lista de zonas
+    Devuelve lista de estaciones cuya zona frecuente:
+    - Tiene al color como índice 1
+    - Tiene < MIN_CAUSAS cajas de ese color
     """
-    mejor_pos = None
-    mejor_dist = float('inf')
+    zonas_necesitadas = []
     
-    for zona in zonas_lista:
-        for pos_celda in zona:
-            if estado_logico[pos_celda-1] == 0:  # Celda libre
-                dist = distancia_mm_pos(pos_celda, x_ref, y_ref)
-                if dist < mejor_dist:
-                    mejor_dist = dist
-                    mejor_pos = pos_celda
+    for est, celdas in ZONAS_FRECUENTES.items():
+        # ¿Este color es índice 1 en esta estación?
+        if indices_estacion[est][1] == color:
+            # ¿Tiene menos de MIN_CAUSAS?
+            if contar_color_en_zona(celdas, color) < MIN_CAUSAS:
+                zonas_necesitadas.append(est)
     
-    return mejor_pos
+    return zonas_necesitadas
+
 
 # Selección principal de celda
-def buscar_por_frecuencia(estacion_origen, color_caja):
+def buscar_por_frecuencia(estacion, color_objetivo, x0, y0):
     """
-    Implementa TODAS las reglas del algoritmo por frecuencia
+    Algoritmo de frecuencia mejorado con índices 1, 2, 3
     """
-    if color_caja not in (1, 2, 3):
-        log(f"Color {color_caja} no válido para algoritmo frecuencia")
+    if color_objetivo not in (1, 2, 3):
+        # Color desconocido → zona menos frecuente
+        pos = mejor_libre_en_lista(ZONA_MENOS_FRECUENTE, x0, y0)
+        if pos:
+            log(f"Frecuencia → color desconocido → zona baja → {pos}")
+            return pos
         return None
     
-    # Obtener coordenadas de la estación de origen
-    x_est, y_est = coords_estacion(estacion_origen)
+    # Determinar índice del color en esta estación
+    indice = obtener_indice_color(estacion, color_objetivo)
     
-    # Obtener índice de este color para ESTA estación
-    indice = obtener_indice_color(estacion_origen, color_caja)
-    log(f"Frecuencia: Estación {estacion_origen}, Color {color_caja}, Índice {indice}")
+    # Si no hay índice asignado (bootstrap inicial)
+    if indice is None:
+        log(f"⚠️ Color {color_objetivo} sin índice en E{estacion}")
+        # Fallback: zona neutra
+        pos = mejor_libre_en_lista(ZONA_NEUTRA, x0, y0)
+        if pos:
+            return pos
+        pos = mejor_libre_en_lista(ZONA_MENOS_FRECUENTE, x0, y0)
+        return pos
     
-    # ===== REGLA 1: MIN_CAUSAS (PRIORIDAD ABSOLUTA) =====
-    for zona_id, celdas in ZONAS_FRECUENTES.items():
-        # Verificar si en esta zona, el color_caja es índice 1
-        if obtener_indice_color(zona_id, color_caja) == 1:
-            cajas_en_zona = contar_color_en_zona(celdas, color_caja)
-            if cajas_en_zona < MIN_CAUSAS:
-                pos = mejor_libre_en_lista(celdas, x_est, y_est)
-                if pos:
-                    log(f"MIN_CAUSAS -> zona {zona_id} (solo {cajas_en_zona} cajas)")
-                    return pos
+    log(f"🎯 E{estacion} color {color_objetivo} → Índice {indice}")
     
-    # ===== PREPARAR LISTAS DE ZONAS PERMITIDAS SEGÚN ÍNDICE =====
-    zonas_a_considerar = []
-    
+    # ========================================
+    # ÍNDICE 1 (MÁS FRECUENTE)
+    # ========================================
     if indice == 1:
-        # ÍNDICE 1: puede ir a su zona, otras zonas, neutra, baja
-        # Su propia zona frecuente (si puede)
-        if puede_ir_a_zona_frecuente(estacion_origen, color_caja):
-            zonas_a_considerar.append(ZONAS_FRECUENTES[estacion_origen])
+        # 1. Su zona frecuente
+        zona_propia = ZONAS_FRECUENTES[estacion]
+        pos = mejor_libre_en_lista(zona_propia, x0, y0)
+        if pos:
+            log(f"Frecuencia Idx1 → zona propia E{estacion} → {pos}")
+            return pos
         
-        # Otras zonas frecuentes (si mismo color)
-        for zona_id, celdas in ZONAS_FRECUENTES.items():
-            if zona_id != estacion_origen and puede_ir_a_zona_frecuente(zona_id, color_caja):
-                zonas_a_considerar.append(celdas)
+        # 2. MIN_CAUSAS en otras zonas frecuentes
+        zonas_min = zonas_necesitan_min_causas(color_objetivo)
+        if zonas_min:
+            for est_min in zonas_min:
+                pos = mejor_libre_en_lista(ZONAS_FRECUENTES[est_min], x0, y0)
+                if pos:
+                    log(f"Frecuencia Idx1 → MIN_CAUSAS E{est_min} → {pos}")
+                    return pos
         
-        # Zona neutra y baja
-        zonas_a_considerar.append(ZONA_NEUTRA)
-        zonas_a_considerar.append(ZONA_BAJA)
+        # 3. Más cercana: zonas frecuentes de su color O zona neutra
+        zonas_opciones = [ZONAS_FRECUENTES[e] for e in ZONAS_FRECUENTES.keys()] + [ZONA_NEUTRA]
+        pos = buscar_mas_cercana_en_zonas(zonas_opciones, x0, y0)
+        if pos:
+            log(f"Frecuencia Idx1 → más cercana → {pos}")
+            return pos
         
+        # 4. Zona menos frecuente
+        pos = mejor_libre_en_lista(ZONA_MENOS_FRECUENTE, x0, y0)
+        if pos:
+            log(f"Frecuencia Idx1 → zona baja → {pos}")
+            return pos
+        
+        # 5. Storage lleno
+        log("Frecuencia Idx1 → sin espacio")
+        return None
+    
+    # ========================================
+    # ÍNDICE 2 (FRECUENCIA MEDIA)
+    # ========================================
     elif indice == 2:
-        # ÍNDICE 2: NO puede ir a su zona, sí a otras, sí a neutra, sí a baja
-        # Otras zonas frecuentes (si mismo color)
-        for zona_id, celdas in ZONAS_FRECUENTES.items():
-            if zona_id != estacion_origen and puede_ir_a_zona_frecuente(zona_id, color_caja):
-                zonas_a_considerar.append(celdas)
+        # 1. MIN_CAUSAS en zonas frecuentes
+        zonas_min = zonas_necesitan_min_causas(color_objetivo)
+        if zonas_min:
+            for est_min in zonas_min:
+                pos = mejor_libre_en_lista(ZONAS_FRECUENTES[est_min], x0, y0)
+                if pos:
+                    log(f"Frecuencia Idx2 → MIN_CAUSAS E{est_min} → {pos}")
+                    return pos
         
-        # Zona neutra y baja
-        zonas_a_considerar.append(ZONA_NEUTRA)
-        zonas_a_considerar.append(ZONA_BAJA)
+        # 2. Más cercana: zonas frecuentes de su color O zona neutra
+        zonas_opciones = [ZONAS_FRECUENTES[e] for e in ZONAS_FRECUENTES.keys()] + [ZONA_NEUTRA]
+        pos = buscar_mas_cercana_en_zonas(zonas_opciones, x0, y0)
+        if pos:
+            log(f"Frecuencia Idx2 → más cercana → {pos}")
+            return pos
         
-    else:  # indice == 3
-        # ÍNDICE 3: NO puede ir a su zona, sí a otras, NO a neutra, sí a baja
-        # Otras zonas frecuentes (si mismo color)
-        for zona_id, celdas in ZONAS_FRECUENTES.items():
-            if zona_id != estacion_origen and puede_ir_a_zona_frecuente(zona_id, color_caja):
-                zonas_a_considerar.append(celdas)
+        # 3. Zona menos frecuente
+        pos = mejor_libre_en_lista(ZONA_MENOS_FRECUENTE, x0, y0)
+        if pos:
+            log(f"Frecuencia Idx2 → zona baja → {pos}")
+            return pos
         
-        # Solo zona baja
-        zonas_a_considerar.append(ZONA_BAJA)
+        # 4. Storage lleno
+        log("Frecuencia Idx2 → sin espacio")
+        return None
     
-    # ===== BUSCAR CELDA MÁS CERCANA ENTRE ZONAS PERMITIDAS =====
-    mejor_pos = None
-    mejor_dist = float('inf')
-    
-    for zona in zonas_a_considerar:
-        for pos_celda in zona:
-            if estado_logico[pos_celda-1] == 0:  # Celda libre
-                dist = distancia_mm_pos(pos_celda, x_est, y_est)
-                if dist < mejor_dist:
-                    mejor_dist = dist
-                    mejor_pos = pos_celda
-    
-    if mejor_pos:
-        # Identificar en qué zona se encontró
-        if mejor_pos in ZONA_BAJA:
-            zona_tipo = "BAJA"
-        elif mejor_pos in ZONA_NEUTRA:
-            zona_tipo = "NEUTRA"
-        else:
-            # Encontrar en qué zona frecuente
-            for zona_id, celdas in ZONAS_FRECUENTES.items():
-                if mejor_pos in celdas:
-                    zona_tipo = f"FRECUENTE {zona_id}"
-                    break
-            else:
-                zona_tipo = "DESCONOCIDA"
+    # ========================================
+    # ÍNDICE 3 (MENOS FRECUENTE)
+    # ========================================
+    elif indice == 3:
+        # 1. MIN_CAUSAS en zonas frecuentes
+        zonas_min = zonas_necesitan_min_causas(color_objetivo)
+        if zonas_min:
+            for est_min in zonas_min:
+                pos = mejor_libre_en_lista(ZONAS_FRECUENTES[est_min], x0, y0)
+                if pos:
+                    log(f"Frecuencia Idx3 → MIN_CAUSAS E{est_min} → {pos}")
+                    return pos
         
-        log(f"Frecuencia -> {zona_tipo} -> celda {mejor_pos} (distancia: {mejor_dist:.1f}mm)")
-        return mejor_pos
+        # 2. Más cercana: zonas frecuentes de su color O zona menos frecuente
+        zonas_opciones = [ZONAS_FRECUENTES[e] for e in ZONAS_FRECUENTES.keys()] + [ZONA_MENOS_FRECUENTE]
+        pos = buscar_mas_cercana_en_zonas(zonas_opciones, x0, y0)
+        if pos:
+            log(f"Frecuencia Idx3 → más cercana → {pos}")
+            return pos
+        
+        # 3. Storage lleno
+        log("Frecuencia Idx3 → sin espacio")
+        return None
     
-    # Si no encontró espacio
-    log(f"Frecuencia -> SIN ESPACIO para color {color_caja} (índice {indice})")
     return None
 
+def actualizar_frecuencia(est, color_descargado):
+    """
+    Actualiza historial e índices después de cada descarga
+    """
+    # Guardar en historial
+    historial[est].append(color_descargado)
+    
+    # Actualizar índices
+    actualizar_indices_estacion(est)
 
 # ================= FUNCIÓN UNIFICADA =================
 def movimiento_auto(estacion, accion, color_sel=None):
@@ -813,69 +891,133 @@ def movimiento_auto(estacion, accion, color_sel=None):
             log("No hay cajas de ese color")
     ocupado = False
 
-# ================= HMI ==================
-# ========================================
-# ========================================
+# ================= HMI =================
 
 # ====================================================
-# ===================== UI ===========================
+# ================= SERIAL UI ========================
 # ====================================================
 
-root = tk.Tk()
-root.title("HMI TESIS SISTEMA AUTOMATIZADO DE ALMACENAMIENTO")
-root.state("zoomed")
-root.resizable(True, True)
+def listar_puertos():
+    puertos = [p.device for p in list_ports.comports()]
+    combo_puertos["values"] = puertos
+    if puertos:
+        combo_puertos.current(0)
+    log("Puertos actualizados")
 
-# Variables de control
-zona_var = tk.IntVar(value=1)
-algoritmo_var = tk.StringVar(value="zonas")
-tipo_instr_var = tk.StringVar(value="carga")
-color_manual_var = tk.StringVar(value="Rojo")
 
-# Variables de estado del sistema
-estado_sistema = {
-    "estado": "DESCONECTADO",
-    "color": "red",
-    "mensaje": "",
-    "timestamp": None
-}
+def conectar_serial():
+    global puerto
+    global pos_actual_x, pos_actual_y
+    
+    try:
+        puerto_sel = combo_puertos.get()
+        puerto = serial.Serial(puerto_sel, 115200, timeout=1)
+        time.sleep(2)
 
-# ================= NOTEBOOK (PESTAÑAS) =================
-notebook = ttk.Notebook(root)
-notebook.pack(fill="both", expand=True)
+        lbl_serial.config(text="CONECTADO", bg="green")
+        btn_serial.config(text="Desconectar")
+        log(f"Conectado a {puerto_sel}")
+        pos_actual_x = 0
+        pos_actual_y = 0
 
-tab_sim = tk.Frame(notebook)
-tab_config = tk.Frame(notebook)
-tab_stats = tk.Frame(notebook)
+    except Exception as e:
+        puerto = None
+        log(f"Error: {e}")
 
-notebook.add(tab_sim, text="Simulación")
-notebook.add(tab_config, text="Configuración")
-notebook.add(tab_stats, text="Estadísticas")
+
+def desconectar_serial():
+    global puerto
+
+    if puerto:
+        puerto.close()
+
+    puerto = None
+    lbl_serial.config(text="DESCONECTADO", bg="red")
+    btn_serial.config(text="Conectar")
+    log("Serial cerrado")
+
+
+def toggle_serial():
+    if puerto and puerto.is_open:
+        desconectar_serial()
+    else:
+        conectar_serial()
+
 
 # ====================================================
-# ========= DEFINICIONES DEL GRID ===================
+# =================== UTILIDADES =====================
 # ====================================================
+
+def log(msg):
+    t = datetime.datetime.now().strftime("%H:%M:%S")
+    if 'text_log' in globals():
+        text_log.insert(tk.END, f"[{t}] {msg}\n")
+        text_log.see(tk.END)
+
+
+def set_estado(ok):
+    if ok:
+        lbl_estado.config(text="EJECUTADO", bg="green")
+    else:
+        lbl_estado.config(text="EN ESPERA", bg="red")
+
+
+def cambiar_zona():
+    global ZONA_ACTIVA
+    ZONA_ACTIVA = zona_var.get()
+    log(f"Zona activa -> {ZONA_ACTIVA}")
+
+
+def cambiar_algoritmo():
+    global ALGORITMO_ACTUAL
+    ALGORITMO_ACTUAL = algoritmo_var.get()
+    log(f"Algoritmo -> {ALGORITMO_ACTUAL}")
+    
+def actualizar_textbox_instrucciones():
+
+    text_instr.delete("1.0", tk.END)
+
+    for i, (tipo, est, col) in enumerate(lista_instrucciones, start=1):
+
+        if tipo == "carga":
+            linea = f"{i}. CARGA   -> Estación {est}"
+
+        else:
+            colores = {1:"Rojo",2:"Verde",3:"Azul"}
+            linea = f"{i}. DESCARGA -> Estación {est} ({colores[col]})"
+
+        text_instr.insert(tk.END, linea + "\n")
+
+def ejecutar_lista():
+
+    def worker():
+
+        for tipo, est, col in lista_instrucciones:
+
+            if tipo == "carga":
+                ciclo_carga(est)
+
+            else:
+                ciclo_descarga(est, col)
+
+        log("Lista completada")
+
+    threading.Thread(target=worker, daemon=True).start()
+
+def cerrar_programa():
+    guardar_estado()
+    root.destroy()
+
+# ====================================================
+# =================== STORAGE GRID ===================
+# ====================================================
+
 FILAS = 5
 COLUMNAS = 10
 celdas_ui = []
 
-def crear_grid(parent):
-    """Crea el grid de 5x10 celdas"""
-    for r in range(FILAS):
-        for c in range(COLUMNAS):
-            lbl = tk.Label(
-                parent,
-                width=4,
-                height=2,
-                bg="gray",
-                relief="ridge",
-                font=("Arial", 7)
-            )
-            lbl.grid(row=FILAS-1-r, column=c, padx=2, pady=2)
-            celdas_ui.append(lbl)
 
 def color_celda(v):
-    """Retorna color según estado lógico"""
     colores = {
         0: "gray",
         1: "red",
@@ -885,708 +1027,429 @@ def color_celda(v):
     }
     return colores.get(v, "black")
 
-def zona_por_pos(pos):
-    """Calcula zona (1-5) según posición de celda"""
-    col = (pos - 1) % ESPACIOS_X
-    return (col // 2) + 1
-
-# ====================================================
-# ========= FUNCIONES ================================
-# ====================================================
-
-def log(msg):
-    t = datetime.datetime.now().strftime("%H:%M:%S")
-    text_log.insert(tk.END, f"[{t}] {msg}\n")
-    text_log.see(tk.END)
-    print(f"[{t}] {msg}")
-
-def actualizar_reloj():
-    lbl_tiempo.config(text=datetime.datetime.now().strftime("%H:%M:%S"))
-    root.after(1000, actualizar_reloj)
-
-def actualizar_variables_tiempo_real():
-    celdas_ocupadas = sum(1 for v in estado_logico if v != 0)
-    porc_ocupacion = int((celdas_ocupadas / TOTAL_CELDAS) * 100)
-    lbl_ocupacion.config(text=f"{porc_ocupacion}% ({celdas_ocupadas}/50 celdas)")
-    
-    r = sum(1 for v in estado_logico if v == 1)
-    v = sum(1 for v in estado_logico if v == 2)
-    a = sum(1 for v in estado_logico if v == 3)
-    d = sum(1 for v in estado_logico if v == 4)
-    lbl_por_color.config(text=f"Rojo:{r} Verde:{v} Azul:{a} Desc:{d}")
-    
-    # Actualizar tiempo ciclo y distancia (valores de ejemplo)
-    lbl_tiempo_ciclo.config(text=f"0.0s")
-    lbl_distancia.config(text=f"0.0m")
-    
-    root.after(1000, actualizar_variables_tiempo_real)
-
-tiempo_inicio_simulacion = datetime.datetime.now()
-
-def actualizar_tiempo_simulacion():
-    delta = datetime.datetime.now() - tiempo_inicio_simulacion
-    horas = int(delta.total_seconds() // 3600)
-    minutos = int((delta.total_seconds() % 3600) // 60)
-    segundos = int(delta.total_seconds() % 60)
-    lbl_tiempo_simulacion.config(text=f"{horas:02d}:{minutos:02d}:{segundos:02d}")
-    root.after(1000, actualizar_tiempo_simulacion)
 
 def actualizar_grid():
     for i, valor in enumerate(estado_logico):
-        if i < len(celdas_ui):
-            celdas_ui[i].config(bg=color_celda(valor), text=str(i+1))
+        celdas_ui[i].config(bg=color_celda(valor))
 
-def cambiar_zona():
-    global ZONA_ACTIVA
-    ZONA_ACTIVA = zona_var.get()
-    log(f"Zona activa cambiada a Zona {ZONA_ACTIVA}")
-    actualizar_panel_algoritmo()
 
-def cambiar_algoritmo():
-    global ALGORITMO_ACTUAL
-    ALGORITMO_ACTUAL = algoritmo_var.get()
-    log(f"Algoritmo cambiado a: {ALGORITMO_ACTUAL}")
-    actualizar_panel_algoritmo()
+def crear_grid(parent):
+    for r in range(FILAS):
+        for c in range(COLUMNAS):
 
-def actualizar_textbox_instrucciones():
-    text_instr.delete("1.0", tk.END)
-    for i, (tipo, est, col) in enumerate(lista_instrucciones, start=1):
-        if tipo == "carga":
-            linea = f"{i}. CARGA   -> Estación {est}"
-        else:
-            colores = {1:"Rojo", 2:"Verde", 3:"Azul"}
-            linea = f"{i}. DESCARGA -> Estación {est} ({colores[col]})"
-        text_instr.insert(tk.END, linea + "\n")
+            lbl = tk.Label(
+                parent,
+                width=4,
+                height=2,
+                bg="gray",
+                relief="ridge"
+            )
+
+            lbl.grid(row=FILAS-1-r, column=c, padx=2, pady=2)
+            celdas_ui.append(lbl)
+
+def generar_lista_random():
+    try:
+        n = int(entry_cantidad.get())
+        lista_instrucciones.clear()
+
+        for _ in range(n):
+            tipo = random.choice(["carga", "descarga"])
+            est = random.randint(1, 3)
+            col = random.randint(1, 3)
+            
+            # Guardar como TUPLA
+            lista_instrucciones.append((tipo, est, col))
+
+        actualizar_lista_ui()
+        actualizar_textbox_instrucciones()  # Actualizar automáticamente
+
+    except:
+        messagebox.showerror("Error", "Cantidad inválida")
 
 def actualizar_lista_ui():
     text_lista.delete("1.0", tk.END)
+    
     for i, (tipo, est, col) in enumerate(lista_instrucciones, start=1):
         if tipo == "carga":
             texto = f"{i}. CARGA   -> Estación {est}"
         else:
             colores = {1: "Rojo", 2: "Verde", 3: "Azul"}
             texto = f"{i}. DESCARGA -> Estación {est} ({colores[col]})"
+        
         text_lista.insert(tk.END, texto + "\n")
 
-def generar_lista_random():
-    try:
-        n = int(entry_cantidad.get())
-        lista_instrucciones.clear()
-        for _ in range(n):
-            tipo = random.choice(["carga", "descarga"])
-            est = random.randint(1, 3)
-            col = random.randint(1, 3)
-            lista_instrucciones.append((tipo, est, col))
-        actualizar_lista_ui()
-        actualizar_textbox_instrucciones()
-        log(f"Lista aleatoria generada: {n} instrucciones")
-    except:
-        messagebox.showerror("Error", "Cantidad inválida")
 
 def agregar_instruccion():
     try:
-        tipo = tipo_instr_var.get().lower()
+        tipo = tipo_instr_var.get().lower()  # "carga" o "descarga"
         est = int(entry_est_manual.get())
+        
+        # Mapear color texto a número
         color_texto = color_manual_var.get()
         color_map = {"Rojo": 1, "Verde": 2, "Azul": 3}
         col = color_map.get(color_texto, 1)
+        
+        # Guardar como TUPLA (igual que ejecutar_lista espera)
         lista_instrucciones.append((tipo, est, col))
+        
         actualizar_lista_ui()
-        actualizar_textbox_instrucciones()
-        log(f"Instrucción agregada: {tipo} Est.{est} Color {color_texto}")
+        actualizar_textbox_instrucciones()  # Actualizar automáticamente
+        
     except:
         messagebox.showerror("Error", "Datos inválidos")
 
 def eliminar_ultima():
     if lista_instrucciones:
-        ultima = lista_instrucciones.pop()
+        lista_instrucciones.pop()
         actualizar_lista_ui()
-        actualizar_textbox_instrucciones()
-        log("Última instrucción eliminada")
-
-def limpiar_log():
-    text_log.delete("1.0", tk.END)
-    log("Log limpiado")
-
-def copiar_log():
-    root.clipboard_append(text_log.get("1.0", tk.END))
-    log("Log copiado al portapapeles")
-
-def listar_puertos():
-    try:
-        puertos = [p.device for p in list_ports.comports()]
-        combo_puertos["values"] = puertos
-        if puertos:
-            combo_puertos.current(0)
-            log(f"Puertos actualizados: {len(puertos)} disponible(s)")
-        else:
-            log("No se encontraron puertos COM")
-    except Exception as e:
-        log(f"Error al listar puertos: {e}")
-
-def conectar_serial():
-    global puerto
-    try:
-        puerto_sel = combo_puertos.get()
-        if not puerto_sel:
-            log("Seleccione un puerto")
-            return
-            
-        puerto = serial.Serial(puerto_sel, 115200, timeout=1)
-        time.sleep(2)
+        actualizar_textbox_instrucciones()  # Actualizar automáticamente
         
-        if puerto.is_open:
-            lbl_serial.config(text="CONECTADO", bg="green", fg="white")
-            btn_serial.config(text="Desconectar")
-            btn_actualizar_puertos.config(state="disabled")
-            actualizar_estado_sistema("CONECTADO", "green")
-            log(f"Conectado a {puerto_sel}")
-            iniciar_monitoreo_estado()
-        else:
-            log("No se pudo abrir el puerto")
-    except Exception as e:
-        puerto = None
-        lbl_serial.config(text="ERROR", bg="orange", fg="white")
-        log(f"Error conexión: {e}")
+def reset_grid():
 
-def desconectar_serial():
-    global puerto
-    if puerto:
-        try:
-            puerto.close()
-            log("Puerto cerrado correctamente")
-        except:
-            pass
-    puerto = None
-    lbl_serial.config(text="DESCONECTADO", bg="red", fg="white")
-    btn_serial.config(text="Conectar")
-    btn_actualizar_puertos.config(state="normal")
-    actualizar_estado_sistema("DESCONECTADO", "red")
-    log("Serial cerrado")
+    # vaciar estructuras
+    for i in range(TOTAL_CELDAS):
+        presencia[i] = 0
+        color[i] = 0
+        estado_logico[i] = 0
 
-def toggle_serial():
-    if puerto and puerto.is_open:
-        desconectar_serial()
-    else:
-        conectar_serial()
+    # limpiar frecuencia
+    for k in historial:
+        historial[k].clear()
 
-def actualizar_estado_sistema(estado, color="green", mensaje=""):
-    lbl_estado.config(text=estado, bg=color, fg="white")
-    estado_sistema["estado"] = estado
-    estado_sistema["color"] = color
-    estado_sistema["mensaje"] = mensaje
-    estado_sistema["timestamp"] = datetime.datetime.now()
+    for est in indices_estacion:
+        indices_estacion[est] = {1: None, 2: None, 3: None}
 
-def iniciar_monitoreo_estado():
-    def monitor():
-        while puerto and puerto.is_open:
-            try:
-                if puerto.in_waiting > 0:
-                    linea = puerto.readline().decode().strip()
-                    if linea:
-                        if "HOME" in linea or "home" in linea:
-                            actualizar_estado_sistema("HOMING", "blue")
-                        elif "ACK" in linea:
-                            actualizar_estado_sistema("EJECUTANDO", "orange")
-                        elif "ERROR" in linea or "error" in linea:
-                            actualizar_estado_sistema("ERROR", "red", linea)
-                
-                if estado_sistema["estado"] not in ["DESCONECTADO", "ERROR"]:
-                    if estado_sistema["timestamp"]:
-                        delta = datetime.datetime.now() - estado_sistema["timestamp"]
-                        if delta.seconds > 2:
-                            actualizar_estado_sistema("LISTO", "green")
-            except:
-                pass
-            time.sleep(0.5)
-    threading.Thread(target=monitor, daemon=True).start()
+    # limpiar instrucciones pendientes
+    lista_instrucciones.clear()
 
-def set_estado(ok):
-    if ok:
-        actualizar_estado_sistema("EJECUTADO", "green")
-    else:
-        actualizar_estado_sistema("EN ESPERA", "red")
-        
-# ====================================================
-# ========= FUNCIÓN DE EJECUTAR LISTA - ORIGINAL =====
-# ====================================================
+    actualizar_grid()
+    actualizar_textbox_instrucciones()
+    guardar_estado()
 
-ejecucion_en_curso = False
-
-def ejecutar_lista():
-    global ejecucion_en_curso
-    
-    if not lista_instrucciones:
-        log("No hay instrucciones para ejecutar")
-        return
-    
-    if ejecucion_en_curso:
-        log("Ya hay una ejecución en curso")
-        return
-    
-    def worker():
-        global ejecucion_en_curso
-        ejecucion_en_curso = True
-        
-        for i, (tipo, est, col) in enumerate(lista_instrucciones):
-            if not ejecucion_en_curso:
-                break
-                
-            try:
-                if tipo == "carga":
-                    ciclo_carga(est)
-                else:
-                    ciclo_descarga(est, col)
-                log(f"Instrucción {i+1}/{len(lista_instrucciones)} completada")
-            except Exception as e:
-                log(f"Error en instrucción {i+1}: {e}")
-                break
-        
-        ejecucion_en_curso = False
-        log("Lista completada")
-    
-    threading.Thread(target=worker, daemon=True).start()
-    log(f"Ejecutando lista de {len(lista_instrucciones)} instrucciones...")
+    log("🧹 Grid reseteado → almacén vacío")
 
 # ====================================================
-# ========= CREAR WIDGETS - DISTRIBUCIÓN EXACTA =====
+# ===================== UI ===========================
 # ====================================================
 
-# FRAME PRINCIPAL DE SIMULACIÓN
-frame_principal = tk.Frame(tab_sim)
-frame_principal.pack(fill="both", expand=True, padx=2, pady=2)
+root = tk.Tk()
+root.title("HMI TESIS SISTEMA AUTOMATIZADO DE ALMACENAMIENTO")
+root.state("zoomed")        # Windows maximizado
+root.resizable(True, True)
 
-# ========= FILA 1 =========
-frame_fila1 = tk.Frame(frame_principal)
-frame_fila1.pack(fill="x", pady=1)
+zona_var = tk.IntVar(value=1)
 
-# Columna 1: COMUNICACIÓN SERIAL
-frame_serial = tk.LabelFrame(frame_fila1, text="COMUNICACIÓN SERIAL", padx=4, pady=2, font=("Arial", 9, "bold"))
-frame_serial.pack(side="left", padx=2, fill="y")
+notebook = ttk.Notebook(root)
+notebook.pack(fill="both", expand=True)
 
-combo_puertos = ttk.Combobox(frame_serial, width=12, font=("Arial", 9))
-combo_puertos.pack(side="left", padx=2)
+tab_sim   = tk.Frame(notebook)
+tab_config = tk.Frame(notebook)
+tab_stats  = tk.Frame(notebook)
 
-btn_actualizar_puertos = tk.Button(frame_serial, text="Actualizar", width=10, font=("Arial", 8))
-btn_actualizar_puertos.pack(side="left", padx=2)
+notebook.add(tab_sim, text="Simulación")
+notebook.add(tab_config, text="Configuración")
+notebook.add(tab_stats, text="Estadísticas")
 
-btn_serial = tk.Button(frame_serial, text="Conectar", width=10, font=("Arial", 8))
-btn_serial.pack(side="left", padx=2)
 
-lbl_serial = tk.Label(frame_serial, text="DESCONECTADO", bg="red", fg="white", width=14, font=("Arial", 8, "bold"))
-lbl_serial.pack(side="left", padx=2)
-
-# Columna 2: ALGORITMO
-frame_alg = tk.LabelFrame(frame_fila1, text="ALGORITMO", padx=8, pady=5, font=("Arial", 9, "bold"))
-frame_alg.pack(side="left", padx=2, fill="y")
-
-btn_zona = tk.Radiobutton(frame_alg, text="ZONAS", variable=algoritmo_var, value="zonas", font=("Arial", 8))
-btn_zona.pack(side="left", padx=2)
-
-btn_producto = tk.Radiobutton(frame_alg, text="PRODUCTO", variable=algoritmo_var, value="producto", font=("Arial", 8))
-btn_producto.pack(side="left", padx=2)
-
-btn_frecuencia = tk.Radiobutton(frame_alg, text="FRECUENCIA", variable=algoritmo_var, value="frecuencia", font=("Arial", 8))
-btn_frecuencia.pack(side="left", padx=2)
-
-# Columna 3: ESTADO
-frame_estado = tk.LabelFrame(frame_fila1, text="ESTADO", padx=8, pady=5, font=("Arial", 9, "bold"))
-frame_estado.pack(side="left", padx=2, fill="y")
-
-frame_estado_inner = tk.Frame(frame_estado)
-frame_estado_inner.pack()
-
-lbl_estado = tk.Label(frame_estado_inner, text="DESCONECTADO", bg="red", fg="white", width=16, font=("Arial", 9, "bold"))
-lbl_estado.grid(row=1, column=0, padx=2)
-
-# FILA 2: Label "Hora:"
-tk.Label(frame_estado_inner, text="Hora:", font=("Arial", 9, "bold")).grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
-
-# FILA 3: Tiempo (reloj)
-lbl_tiempo = tk.Label(frame_estado_inner, text="", font=("Arial", 9, "bold"))
-lbl_tiempo.grid(row=0, column=1, sticky="w", padx=2, pady=2)
-
-# Columna 4: VARIABLES DEL SISTEMA - 2x2 CENTRADO
-frame_variables_top = tk.LabelFrame(frame_fila1, text="VARIABLES DEL SISTEMA", padx=8, pady=5, font=("Arial", 9, "bold"))
-frame_variables_top.pack(side="left", padx=2, fill="both", expand=True)
-
-# Frame contenedor centrado
-frame_centrado = tk.Frame(frame_variables_top)
-frame_centrado.place(relx=0.5, rely=0.5, anchor="center")  # CENTRADO PERFECTO
-
-# Configurar grid 2x2
-frame_centrado.grid_columnconfigure(0, weight=0)  # Label - tamaño fijo
-frame_centrado.grid_columnconfigure(1, weight=0)  # Valor - tamaño fijo
-frame_centrado.grid_rowconfigure(0, weight=0)
-frame_centrado.grid_rowconfigure(1, weight=0)
-
-# FILA 0, COLUMNA 0 - Tiempo
-tk.Label(frame_centrado, text="Tiempo encendido:", font=("Arial", 8, "bold")).grid(row=0, column=0, sticky="e", padx=5, pady=2)
-lbl_tiempo_simulacion = tk.Label(frame_centrado, text="00:00:00", font=("Arial", 8))
-lbl_tiempo_simulacion.grid(row=0, column=1, sticky="w", padx=5, pady=2)
-
-# FILA 0, COLUMNA 2 - Ocupación (usamos column=2 para separar)
-tk.Label(frame_centrado, text="Ocupación:", font=("Arial", 8, "bold")).grid(row=0, column=2, sticky="e", padx=15, pady=2)
-lbl_ocupacion = tk.Label(frame_centrado, text="0% (0/50)", font=("Arial", 8))
-lbl_ocupacion.grid(row=0, column=3, sticky="w", padx=5, pady=2)
-
-# FILA 1, COLUMNA 0 - Cajas
-tk.Label(frame_centrado, text="Cajas:", font=("Arial", 8, "bold")).grid(row=1, column=0, sticky="e", padx=5, pady=2)
-lbl_por_color = tk.Label(frame_centrado, text="R0 V0 A0 D0", font=("Arial", 8))
-lbl_por_color.grid(row=1, column=1, sticky="w", padx=5, pady=2)
-
-# FILA 1, COLUMNA 2 - Tiempo ciclo
-tk.Label(frame_centrado, text="Tiempo ciclo:", font=("Arial", 8, "bold")).grid(row=1, column=2, sticky="e", padx=15, pady=2)
-lbl_tiempo_ciclo = tk.Label(frame_centrado, text="0.0s", font=("Arial", 8))
-lbl_tiempo_ciclo.grid(row=1, column=3, sticky="w", padx=5, pady=2)
-
-# ========= FILA 2 =========
-frame_fila2 = tk.Frame(frame_principal)
-frame_fila2.pack(fill="x", pady=2)
-
-# Columna 1-3: ALGORITMO ELEGIDO (ocupa 3 columnas)
-frame_algoritmo_elegido = tk.LabelFrame(frame_fila2, text="ALGORITMO ELEGIDO", padx=8, pady=5, font=("Arial", 9, "bold"))
-frame_algoritmo_elegido.pack(side="left", padx=2, fill="both", expand=True)
-
-# PANEL ALGORITMO DINÁMICO
-frame_panel_algoritmo = tk.Frame(frame_algoritmo_elegido)
-frame_panel_algoritmo.pack(fill="both", expand=True, padx=5, pady=5)
-
-# Columna 4: ACCIONES + VARIABLES (PARTE INFERIOR)
-frame_derecha_fila2 = tk.Frame(frame_fila2)
-frame_derecha_fila2.pack(side="left", padx=2, fill="both")
-
-# ACCIONES
-frame_acciones = tk.LabelFrame(frame_derecha_fila2, text="ACCIONES", padx=8, pady=5, font=("Arial", 9, "bold"))
-frame_acciones.pack(fill="x", pady=(0,2))
-
-btn_ejecutar = tk.Button(frame_acciones, text="EJECUTAR", bg="#4CAF50", fg="white", width=10, font=("Arial", 8, "bold"))
-btn_ejecutar.pack(side="left", padx=2)
-
-btn_home = tk.Button(frame_acciones, text="HOME", bg="#2196F3", fg="white", width=10, font=("Arial", 8, "bold"))
-btn_home.pack(side="left", padx=2)
-
-# VARIABLES DEL SISTEMA (PARTE INFERIOR)
-frame_variables_bottom = tk.LabelFrame(frame_derecha_fila2, text="", padx=8, pady=5, font=("Arial", 9, "bold"))
-frame_variables_bottom.pack(fill="x", pady=(2,0))
-
-lbl_distancia = tk.Label(frame_variables_bottom, text="Distancia: 0.0m", font=("Arial", 8))
-lbl_distancia.pack(side="left", padx=10)
-
-# ========= FILA 3 =========
-frame_fila3 = tk.Frame(frame_principal)
-frame_fila3.pack(fill="both", expand=True, pady=2)
-
-# Columna 1-3: GRID + LEYENDAS (en una sola fila abajo)
-frame_grid_container = tk.LabelFrame(frame_fila3, text="ALMACÉN - 50 CELDAS", padx=10, pady=10, font=("Arial", 10, "bold"))
-frame_grid_container.pack(side="left", padx=2, fill="both", expand=True)
-
-# Grid centrado
-frame_grid_centrado = tk.Frame(frame_grid_container)
-frame_grid_centrado.pack(expand=True)
-
-frame_grid = tk.Frame(frame_grid_centrado, bg="lightgray")
-frame_grid.pack(pady=10)
-
-frame_grid_celdas = tk.Frame(frame_grid, bg="lightgray")
-frame_grid_celdas.pack()
-
-crear_grid(frame_grid_celdas)
-
-# LEYENDAS DEL GRID - UNA SOLA FILA EN LA PARTE INFERIOR IZQUIERDA
-frame_leyendas_container = tk.Frame(frame_grid_container)
-frame_leyendas_container.pack(side="bottom", anchor="sw", pady=10)
-
-frame_leyendas = tk.Frame(frame_leyendas_container, bg="lightgray", relief="groove", bd=1)
-frame_leyendas.pack()
-
-leyendas = [
-    ("Celda vacía", "gray", "black"),
-    ("Caja color rojo", "red", "black"),
-    ("Caja color verde", "green", "black"),
-    ("Caja color azul", "blue", "black"),
-    ("Caja color desconocido", "yellow", "black")
-]
-
-for i, (texto, bg_color, fg_color) in enumerate(leyendas):
-    lbl = tk.Label(frame_leyendas, text=texto, bg=bg_color, fg=fg_color,
-                  width=25, font=("Arial", 8, "bold"), anchor="center", padx=2)
-    lbl.grid(row=0, column=i, padx=1, pady=1)
-
-# Columna 4: LISTA INSTRUCCIONES + REGISTRO EVENTOS
-frame_derecha_fila3 = tk.Frame(frame_fila3, width=280)
-frame_derecha_fila3.pack(side="left", padx=2, fill="both", expand=False)
-frame_derecha_fila3.pack_propagate(False)
-
-# LISTA DE INSTRUCCIONES
-frame_lista_container = tk.LabelFrame(frame_derecha_fila3, text="LISTA DE INSTRUCCIONES", font=("Arial", 10, "bold"))
-frame_lista_container.pack(fill="both", expand=True, pady=(0,2))
-
-btn_limpiar_lista = tk.Button(frame_lista_container, text="Limpiar lista", font=("Arial", 8), width=12)
-btn_limpiar_lista.pack(anchor="ne", padx=5, pady=5)
-
-text_instr = tk.Text(frame_lista_container, height=14, font=("Consolas", 9), wrap=tk.WORD)
-text_instr.pack(fill="both", expand=True, padx=5, pady=5)
-
-# REGISTRO DE EVENTOS
-frame_log_container = tk.LabelFrame(frame_derecha_fila3, text="REGISTRO DE EVENTOS", font=("Arial", 10, "bold"))
-frame_log_container.pack(fill="both", expand=True, pady=(2,0))
-
-frame_log_tools = tk.Frame(frame_log_container)
-frame_log_tools.pack(fill="x", pady=2)
-
-btn_limpiar_log = tk.Button(frame_log_tools, text="Limpiar log", font=("Arial", 8), width=10)
-btn_limpiar_log.pack(side="left", padx=2)
-
-btn_copiar_log = tk.Button(frame_log_tools, text="Copiar log", font=("Arial", 8), width=10)
-btn_copiar_log.pack(side="left", padx=2)
-
-lbl_log_timestamp = tk.Label(frame_log_tools, text="", font=("Arial", 7))
-lbl_log_timestamp.pack(side="right", padx=5)
-
-text_log = tk.Text(frame_log_container, height=10, font=("Consolas", 8), wrap=tk.WORD)
-text_log.pack(fill="both", expand=True, padx=5, pady=5)
-
-scroll_log = tk.Scrollbar(text_log)
-scroll_log.pack(side="right", fill="y")
-text_log.config(yscrollcommand=scroll_log.set)
-scroll_log.config(command=text_log.yview)
 
 # ====================================================
-# ========= ACTUALIZAR PANEL ALGORITMO ==============
+# ========= SIMULACIÓN - BLOQUE SUPERIOR =============
 # ====================================================
-frame_algoritmo_info = tk.LabelFrame(tab_sim, text="⚙️ ALGORITMO ELEGIDO", 
-                                      font=("Arial", 12, "bold"), padx=10, pady=10)
-frame_algoritmo_info.pack(fill="x", padx=10, pady=5)
-
-# Frame interno para contenido dinámico (se actualizará según algoritmo)
-inner_algoritmo_info = tk.Frame(frame_algoritmo_info)
-inner_algoritmo_info.pack(fill="both", expand=True, padx=5, pady=5)
 
 
-def actualizar_panel_algoritmo():
-    for widget in frame_panel_algoritmo.winfo_children():
-        widget.destroy()
-    
-    algoritmo = algoritmo_var.get()
-    
-    if algoritmo == "zonas":
-        inner_frame = tk.Frame(frame_panel_algoritmo)
-        inner_frame.pack(fill="both", expand=True)
-        
-        tk.Label(inner_frame, text="Zona activa:", font=("Arial", 9, "bold")).pack(side="left", padx=2)
-        lbl_zona_actual = tk.Label(inner_frame, text=str(ZONA_ACTIVA),
-                                  font=("Arial", 12, "bold"), width=2, 
-                                  bg="lightblue", relief="sunken")
-        lbl_zona_actual.pack(side="left", padx=2)
-        
-        tk.Label(inner_frame, text="  ", font=("Arial", 9)).pack(side="left")
-        tk.Label(inner_frame, text="Seleccionar zona:", font=("Arial", 9)).pack(side="left", padx=2)
-        
-        for i in range(1, 6):
-            rb = tk.Radiobutton(inner_frame, text=f"{i}",
-                               variable=zona_var, value=i,
-                               indicatoron=False, width=3,
-                               font=("Arial", 8, "bold"))
-            rb.pack(side="left", padx=1)
-            rb.config(command=cambiar_zona)
-        
-        tk.Label(inner_frame, text="  ", font=("Arial", 9)).pack(side="left")
-        
-        celdas_zona = sum(1 for i in range(TOTAL_CELDAS) 
-                         if zona_por_pos(i+1) == ZONA_ACTIVA and estado_logico[i] != 0)
-        total_zona = sum(1 for i in range(TOTAL_CELDAS) if zona_por_pos(i+1) == ZONA_ACTIVA)
-        porcentaje = int((celdas_zona / total_zona) * 100) if total_zona > 0 else 0
-        
-        tk.Label(inner_frame, 
-                text=f"Ocupación: {porcentaje}% ({celdas_zona}/{total_zona} celdas)",
-                font=("Arial", 9, "bold")).pack(side="left", padx=5)
-        
-    elif algoritmo == "producto":
-        inner_frame = tk.Frame(frame_panel_algoritmo)
-        inner_frame.pack(fill="both", expand=True)
-        
-        total_rojo = sum(1 for i in range(TOTAL_CELDAS) 
-                        if 0 <= (i % ESPACIOS_X) <= 2 and estado_logico[i] != 0)
-        total_rojo_max = 15
-        pct_rojo = int((total_rojo / total_rojo_max) * 100)
-        
-        total_verde = sum(1 for i in range(TOTAL_CELDAS) 
-                         if 3 <= (i % ESPACIOS_X) <= 5 and estado_logico[i] != 0)
-        total_verde_max = 15
-        pct_verde = int((total_verde / total_verde_max) * 100)
-        
-        total_azul = sum(1 for i in range(TOTAL_CELDAS) 
-                        if 7 <= (i % ESPACIOS_X) <= 9 and estado_logico[i] != 0)
-        total_azul_max = 15
-        pct_azul = int((total_azul / total_azul_max) * 100)
-        
-        total_desc = sum(1 for i in range(TOTAL_CELDAS) 
-                        if (i % ESPACIOS_X) == 6 and estado_logico[i] != 0)
-        total_desc_max = 5
-        pct_desc = int((total_desc / total_desc_max) * 100)
-        
-        tk.Label(inner_frame, text="Cajas registradas:", font=("Arial", 9, "bold")).pack(side="left", padx=2)
-        
-        tk.Label(inner_frame, text="🔴", font=("Arial", 10)).pack(side="left", padx=1)
-        tk.Label(inner_frame, text=f"Rojo: {total_rojo}/{total_rojo_max} ({pct_rojo}%)", 
-                font=("Arial", 8)).pack(side="left", padx=2)
-        
-        tk.Label(inner_frame, text="🟢", font=("Arial", 10)).pack(side="left", padx=1)
-        tk.Label(inner_frame, text=f"Verde: {total_verde}/{total_verde_max} ({pct_verde}%)", 
-                font=("Arial", 8)).pack(side="left", padx=2)
-        
-        tk.Label(inner_frame, text="🔵", font=("Arial", 10)).pack(side="left", padx=1)
-        tk.Label(inner_frame, text=f"Azul: {total_azul}/{total_azul_max} ({pct_azul}%)", 
-                font=("Arial", 8)).pack(side="left", padx=2)
-        
-        tk.Label(inner_frame, text="🟡", font=("Arial", 10)).pack(side="left", padx=1)
-        tk.Label(inner_frame, text=f"Desc: {total_desc}/{total_desc_max} ({pct_desc}%)", 
-                font=("Arial", 8)).pack(side="left", padx=2)
-        
-    elif algoritmo == "frecuencia":
-        inner_frame = tk.Frame(frame_panel_algoritmo)
-        inner_frame.pack(fill="both", expand=True)
-        
-        tk.Label(inner_frame, text="Estaciones - color más solicitado:", font=("Arial", 9, "bold")).pack(side="left", padx=2)
-        
-        color_icons = {1: "🔴", 2: "🟢", 3: "🔵"}
-        color_names = {1: "Rojo", 2: "Verde", 3: "Azul"}
-        
-        for est in [1, 2, 3]:
-            hist = list(historial[est])
-            conteo = {1:0, 2:0, 3:0}
-            for c in hist:
-                if c in conteo:
-                    conteo[c] += 1
-            
-            sorted_colors = sorted(conteo.items(), key=lambda x: x[1], reverse=True)
-            top1 = sorted_colors[0][0] if sorted_colors and sorted_colors[0][1] > 0 else 1
-            top1_icon = color_icons.get(top1, "⚪")
-            top1_name = color_names.get(top1, "?")
-            
-            est_frame = tk.Frame(inner_frame)
-            est_frame.pack(side="left", padx=5)
-            
-            tk.Label(est_frame, text=f"E{est}:", font=("Arial", 8, "bold")).pack(side="left")
-            tk.Label(est_frame, text=f"{top1_icon} {top1_name}", font=("Arial", 8)).pack(side="left", padx=2)
-        
-        tk.Label(inner_frame, text=f"  Stock mínimo: {MIN_CAUSAS} cajas", 
-                font=("Arial", 8, "bold")).pack(side="left", padx=10)
+frame_barra = tk.Frame(tab_sim)
+frame_barra.pack(fill="x", pady=10)
+
+
+# -------- SERIAL --------
+frame_serial = tk.LabelFrame(frame_barra, text="Serial", padx=10, pady=5)
+frame_serial.pack(side="left", padx=10)
+
+combo_puertos = ttk.Combobox(frame_serial, width=8)
+combo_puertos.pack(side="left", padx=5)
+
+btn_serial = tk.Button(frame_serial, text="Conectar", command=toggle_serial)
+btn_serial.pack(side="left", padx=5)
+
+tk.Button(frame_serial, text="↻", width=3, command=listar_puertos).pack(side="left", padx=3)
+
+
+lbl_serial = tk.Label(frame_serial, text="DESCONECTADO",
+                      bg="red", fg="white", width=12)
+lbl_serial.pack(side="left", padx=5)
+
+listar_puertos()
+
+
+# -------- ALGORITMO --------
+frame_alg = tk.LabelFrame(frame_barra, text="Algoritmo", padx=10, pady=5)
+frame_alg.pack(side="left", padx=20)
+
+algoritmo_var = tk.StringVar(value="zonas")
+
+tk.Radiobutton(frame_alg, text="Zonas",
+               variable=algoritmo_var, value="zonas",
+               command=cambiar_algoritmo).pack(side="left")
+
+tk.Radiobutton(frame_alg, text="Producto",
+               variable=algoritmo_var, value="producto",
+               command=cambiar_algoritmo).pack(side="left")
+
+tk.Radiobutton(frame_alg, text="Frecuencia",
+               variable=algoritmo_var, value="frecuencia",
+               command=cambiar_algoritmo).pack(side="left")
+
+
+# -------- ESTADO --------
+frame_estado = tk.Frame(frame_barra)
+frame_estado.pack(side="right", padx=20)
+
+tk.Label(frame_estado, text="Estado:", font=("Arial", 10)).pack(side="left", padx=(0,5))
+
+lbl_estado = tk.Label(frame_estado,
+                      text="EN ESPERA",
+                      bg="red",
+                      fg="white",
+                      width=12,
+                      font=("Arial", 10, "bold"))
+lbl_estado.pack(side="left")
+
+
 
 # ====================================================
-# ========= TAB CONFIGURACIÓN =======================
+# ============ ACCIONES (segunda fila) ===============
 # ====================================================
+
+frame_controles = tk.Frame(tab_sim)
+frame_controles.pack(pady=5)
+
+frame_instr = tk.LabelFrame(tab_sim, text="Instrucciones")
+frame_instr.pack(side="right", fill="y", padx=10, pady=10)
+
+text_instr = tk.Text(frame_instr, width=40, height=25)
+text_instr.pack()
+
+tk.Button(frame_instr, text="Actualizar",
+          command=actualizar_textbox_instrucciones).pack(pady=3)
+
+tk.Button(frame_instr, text="Ejecutar lista",
+          command=ejecutar_lista).pack(pady=3)
+
+tk.Button(frame_instr, text="RESET GRID", command=reset_grid).pack(pady=3)
+
+
+
+# -------- ZONAS (YA NO EN PRIMERA FILA) --------
+frame_zona = tk.LabelFrame(frame_controles, text="Zona activa", padx=10, pady=5)
+frame_zona.pack(side="left", padx=10)
+
+for i in range(1, 6):
+    tk.Radiobutton(
+        frame_zona,
+        text=f"Zona {i}",
+        indicatoron=False,
+        width=7,
+        variable=zona_var,
+        value=i,
+        command=cambiar_zona
+    ).pack(side="left", padx=2)
+
+
+# -------- ACCIÓN --------
+accion_var = tk.StringVar(value="carga")
+
+frame_accion = tk.LabelFrame(frame_controles, text="Acción", padx=10, pady=5)
+frame_accion.pack(side="left", padx=10)
+
+tk.Radiobutton(frame_accion, text="Carga",
+               variable=accion_var, value="carga").pack(side="left")
+
+tk.Radiobutton(frame_accion, text="Descarga",
+               variable=accion_var, value="descarga").pack(side="left")
+
+
+# -------- ESTACIÓN --------
+frame_est = tk.LabelFrame(frame_controles, text="Estación", padx=10, pady=5)
+frame_est.pack(side="left", padx=10)
+
+entry_est = tk.Entry(frame_est, width=5)
+entry_est.pack()
+
+
+# -------- COLOR --------
+color_var = tk.IntVar(value=1)
+
+frame_color = tk.LabelFrame(frame_controles, text="Color", padx=10, pady=5)
+frame_color.pack(side="left", padx=10)
+
+tk.Radiobutton(frame_color, text="Rojo", bg="red",
+               variable=color_var, value=1).pack(side="left")
+
+tk.Radiobutton(frame_color, text="Verde", bg="green",
+               variable=color_var, value=2).pack(side="left")
+
+tk.Radiobutton(frame_color, text="Azul", bg="blue",
+               variable=color_var, value=3).pack(side="left")
+
+
+# ====================================================
+# =============== GRID CENTRAL =======================
+# ====================================================
+
+frame_grid = tk.Frame(tab_sim)
+frame_grid.pack(pady=15)
+
+crear_grid(frame_grid)
+
+
+# ====================================================
+# ================= LOG ==============================
+# ====================================================
+
+frame_bottom = tk.Frame(tab_sim)
+frame_bottom.pack(fill="both", expand=True, padx=10, pady=10)
+
+text_log = tk.Text(frame_bottom)
+text_log.pack(fill="both", expand=True)
+
+
+# ================= TAB CONFIGURACIÓN =================
+
+
 
 tab_config.grid_rowconfigure(1, weight=1)
+
 tab_config.grid_columnconfigure(0, weight=2)
 tab_config.grid_columnconfigure(1, weight=2)
 tab_config.grid_columnconfigure(2, weight=3)
 
-frame_general = tk.LabelFrame(tab_config, text="Configuraciones generales", height=80, font=("TkDefaultFont", 10, "bold"))
+
+# ===== FILA 1 → Configuraciones generales (vacío) =====
+frame_general = tk.LabelFrame(
+    tab_config,
+    text="Configuraciones generales",
+    height=80,
+    font=("TkDefaultFont", 10, "bold")
+)
 frame_general.grid(row=0, column=0, columnspan=3, sticky="ew", padx=10, pady=10)
 
-frame_gen = tk.LabelFrame(tab_config, text="Generador de instrucciones", font=("TkDefaultFont", 10, "bold"))
+
+# ===== FILA 2 → Generador =====
+frame_gen = tk.LabelFrame(
+    tab_config,
+    text="Generador de instrucciones",
+    font=("TkDefaultFont", 10, "bold")
+)
 frame_gen.grid(row=1, column=0, columnspan=3, sticky="nsew", padx=10, pady=10)
+
 frame_gen.grid_columnconfigure(0, weight=2)
 frame_gen.grid_columnconfigure(1, weight=2)
 frame_gen.grid_columnconfigure(2, weight=3)
 
-# COLUMNA 1 - MANUAL
-frame_manual = tk.LabelFrame(frame_gen, text="Instrucción manual", font=("TkDefaultFont", 10, "bold"))
+
+# ====================================================
+# ========= COLUMNA 1 → MANUAL =======================
+# ====================================================
+
+frame_manual = tk.LabelFrame(
+    frame_gen,
+    text="Instrucción manual",
+    font=("TkDefaultFont", 10, "bold")
+)
 frame_manual.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+
 frame_manual.grid_columnconfigure(1, weight=1)
 
-tk.Label(frame_manual, text="Instrucción:", font=("TkDefaultFont", 9, "bold")).grid(row=0, column=0, sticky="w", pady=4)
-combo_tipo_instr = ttk.Combobox(frame_manual, textvariable=tipo_instr_var, values=["Carga", "Descarga"], state="readonly")
-combo_tipo_instr.grid(row=0, column=1, sticky="ew")
+tk.Label(frame_manual, text="Instrucción:", font=("TkDefaultFont", 9, "bold"))\
+    .grid(row=0, column=0, sticky="w", pady=4)
 
-tk.Label(frame_manual, text="N° Estación:", font=("TkDefaultFont", 9, "bold")).grid(row=1, column=0, sticky="w", pady=4)
+tipo_instr_var = tk.StringVar(value="carga")
+
+ttk.Combobox(
+    frame_manual,
+    textvariable=tipo_instr_var,
+    values=["Carga", "Descarga"],
+    state="readonly"
+).grid(row=0, column=1, sticky="ew")
+
+
+tk.Label(frame_manual, text="N° Estación:", font=("TkDefaultFont", 9, "bold"))\
+    .grid(row=1, column=0, sticky="w", pady=4)
+
 entry_est_manual = tk.Entry(frame_manual)
 entry_est_manual.grid(row=1, column=1, sticky="ew")
 
-tk.Label(frame_manual, text="Color de caja:", font=("TkDefaultFont", 9, "bold")).grid(row=2, column=0, sticky="w", pady=4)
-combo_color_manual = ttk.Combobox(frame_manual, textvariable=color_manual_var, values=["Rojo", "Verde", "Azul"], state="readonly")
-combo_color_manual.grid(row=2, column=1, sticky="ew")
 
-btn_agregar_instr = tk.Button(frame_manual, text="Agregar instrucción")
-btn_agregar_instr.grid(row=3, column=0, columnspan=2, sticky="ew", pady=6)
+tk.Label(frame_manual, text="Color de caja:", font=("TkDefaultFont", 9, "bold"))\
+    .grid(row=2, column=0, sticky="w", pady=4)
 
-btn_eliminar_instr = tk.Button(frame_manual, text="Eliminar última instrucción")
-btn_eliminar_instr.grid(row=4, column=0, columnspan=2, sticky="ew")
+color_manual_var = tk.StringVar(value="Rojo")
 
-# COLUMNA 2 - ALEATORIAS
-frame_rand = tk.LabelFrame(frame_gen, text="Instrucciones aleatorias", font=("TkDefaultFont", 10, "bold"))
+ttk.Combobox(
+    frame_manual,
+    textvariable=color_manual_var,
+    values=["Rojo", "Verde", "Azul"],
+    state="readonly"
+).grid(row=2, column=1, sticky="ew")
+
+
+tk.Button(frame_manual, text="Agregar instrucción",
+          command=agregar_instruccion)\
+          .grid(row=3, column=0, columnspan=2, sticky="ew", pady=6)
+
+tk.Button(frame_manual, text="Eliminar última instrucción",
+          command=eliminar_ultima)\
+          .grid(row=4, column=0, columnspan=2, sticky="ew")
+
+
+# ====================================================
+# ========= COLUMNA 2 → ALEATORIAS ===================
+# ====================================================
+
+frame_rand = tk.LabelFrame(
+    frame_gen,
+    text="Instrucciones aleatorias",
+    font=("TkDefaultFont", 10, "bold")
+)
 frame_rand.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+
 frame_rand.grid_columnconfigure(1, weight=1)
 
-tk.Label(frame_rand, text="Cantidad:").grid(row=0, column=0, sticky="w")
+tk.Label(frame_rand, text="Cantidad:")\
+    .grid(row=0, column=0, sticky="w")
+
 entry_cantidad = tk.Entry(frame_rand)
 entry_cantidad.grid(row=0, column=1, sticky="ew")
 
-btn_generar_lista = tk.Button(frame_rand, text="Generar lista")
-btn_generar_lista.grid(row=1, column=0, columnspan=2, sticky="ew", pady=6)
+tk.Button(frame_rand, text="Generar lista",
+          command=generar_lista_random)\
+          .grid(row=1, column=0, columnspan=2, sticky="ew", pady=6)
 
-# COLUMNA 3 - VISOR
-frame_lista = tk.LabelFrame(frame_gen, text="Lista de instrucciones", font=("TkDefaultFont", 10, "bold"))
+
+# ====================================================
+# ========= COLUMNA 3 → VISOR ========================
+# ====================================================
+
+frame_lista = tk.LabelFrame(
+    frame_gen,
+    text="Lista de instrucciones",
+    font=("TkDefaultFont", 10, "bold"))
+
 frame_lista.grid(row=0, column=2, sticky="nsew", padx=10, pady=10)
+
 frame_lista.grid_rowconfigure(0, weight=1)
 frame_lista.grid_columnconfigure(0, weight=1)
 
 text_lista = tk.Text(frame_lista)
 text_lista.grid(row=0, column=0, sticky="nsew")
-
-# ====================================================
-# ========= TAB ESTADÍSTICAS ========================
-# ====================================================
-
-tk.Label(tab_stats, text="ESTADÍSTICAS DEL SISTEMA", font=("Arial", 14, "bold")).pack(pady=20)
-tk.Label(tab_stats, text="(Próximamente...)", font=("Arial", 10)).pack()
-
-# ====================================================
-# ========= ASIGNACIÓN DE COMANDOS =================
-# ====================================================
-
-btn_actualizar_puertos.config(command=listar_puertos)
-btn_serial.config(command=toggle_serial)
-btn_zona.config(command=cambiar_algoritmo)
-btn_producto.config(command=cambiar_algoritmo)
-btn_frecuencia.config(command=cambiar_algoritmo)
-
-# ✅ SOLO EJECUTAR - SIN PAUSAR/DETENER
-btn_ejecutar.config(command=ejecutar_lista)
-btn_home.config(command=lambda: enviar_comando(HOME) if puerto else log("No conectado"))
-
-btn_limpiar_lista.config(command=lambda: [lista_instrucciones.clear(), 
-                                         actualizar_lista_ui(),
-                                         actualizar_textbox_instrucciones(),
-                                         log("Lista de instrucciones limpiada")])
-
-btn_limpiar_log.config(command=limpiar_log)
-btn_copiar_log.config(command=copiar_log)
-
-btn_agregar_instr.config(command=agregar_instruccion)
-btn_eliminar_instr.config(command=eliminar_ultima)
-btn_generar_lista.config(command=generar_lista_random)
-
-algoritmo_var.trace_add("write", lambda *args: actualizar_panel_algoritmo())
-
-# ====================================================
-# ========= INICIALIZACIÓN ==========================
-# ====================================================
-
-lbl_log_timestamp.config(text=f"Inicio: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-listar_puertos()
-actualizar_reloj()
-actualizar_tiempo_simulacion()
-actualizar_variables_tiempo_real()
-actualizar_grid()
-actualizar_panel_algoritmo()
-
-log("Sistema HMI iniciado")
-log("Esperando conexión serial...")
-
 # ====================================================
 # ================= MAIN =============================
 # ====================================================
+cargar_estado()
+root.protocol("WM_DELETE_WINDOW", cerrar_programa)
 root.mainloop()
+
+
+
+
