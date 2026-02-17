@@ -1355,6 +1355,14 @@ scroll_log.config(command=text_log.yview)
 # ====================================================
 # ========= ACTUALIZAR PANEL ALGORITMO ==============
 # ====================================================
+frame_algoritmo_info = tk.LabelFrame(tab_sim, text="⚙️ ALGORITMO ELEGIDO", 
+                                      font=("Arial", 12, "bold"), padx=10, pady=10)
+frame_algoritmo_info.pack(fill="x", padx=10, pady=5)
+
+# Frame interno para contenido dinámico (se actualizará según algoritmo)
+inner_algoritmo_info = tk.Frame(frame_algoritmo_info)
+inner_algoritmo_info.pack(fill="both", expand=True, padx=5, pady=5)
+
 
 def actualizar_panel_algoritmo():
     for widget in frame_panel_algoritmo.winfo_children():

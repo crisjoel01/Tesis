@@ -52,7 +52,7 @@ byte presencia[50];
 
 const byte TCA_CANAL[3] = {
   2,  // estación 1 -> SD2/SC2
-  1,  // estación 2 -> SD1/SC1
+  3,  // estación 2 -> SD1/SC1
   0   // estación 3 -> SD0/SC0
 };
 

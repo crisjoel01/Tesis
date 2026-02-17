@@ -97,10 +97,10 @@ historial = {
 }
 
 # color dominante actual por estación (etiqueta dinámica)
-zona_frecuente_color = {
-    1: None,
-    2: None,
-    3: None
+indices_estacion = {
+    1: {1: None, 2: None, 3: None},  # E1: {índice: color}
+    2: {1: None, 2: None, 3: None},  # E2
+    3: {1: None, 2: None, 3: None}   # E3
 }
 
 
@@ -122,7 +122,7 @@ def guardar_estado():
         "color": color,
         "estado_logico": estado_logico,
         "lista_instrucciones": lista_instrucciones,
-        "zona_frecuente_color": zona_frecuente_color,
+        "indices_estacion": indices_estacion,
         "historial": {k: list(v) for k, v in historial.items()}
     }
 
@@ -134,7 +134,7 @@ def guardar_estado():
 def cargar_estado():
 
     global lista_instrucciones
-    global zona_frecuente_color, historial
+    global indices_estacion, historial
 
     if not os.path.exists(ARCHIVO_ESTADO):
         return
@@ -148,7 +148,9 @@ def cargar_estado():
 
     lista_instrucciones[:] = [tuple(x) for x in data["lista_instrucciones"]]
 
-    zona_frecuente_color.update(data["zona_frecuente_color"])
+    if "indices_estacion" in data:
+        for k, v in data["indices_estacion"].items():
+            indices_estacion[int(k)] = v
 
     for k, v in data["historial"].items():
         historial[int(k)] = deque(v, maxlen=HIST_N)
@@ -573,6 +575,20 @@ def contar_color_en_zona(celdas, color_obj):
             c += 1
     return c
 
+def obtener_indice_color(estacion, color):
+    """
+    Devuelve el índice (1, 2, 3) del color en la estación
+    1 = más frecuente, 2 = medio, 3 = menos frecuente
+    None = sin asignar
+    """
+    for idx, col in indices_estacion[estacion].items():
+        if col == color:
+            return idx
+    return None
+
+def obtener_color_indice(estacion, indice):
+    """Devuelve el color que tiene ese índice en la estación"""
+    return indices_estacion[estacion].get(indice)
 
 def mejor_libre_en_lista(celdas, x0, y0):
     mejor = None
@@ -587,6 +603,27 @@ def mejor_libre_en_lista(celdas, x0, y0):
 
     return mejor
 
+def buscar_mas_cercana_en_zonas(lista_zonas, x0, y0):
+    """
+    Busca la celda vacía más cercana entre todas las zonas de la lista
+    lista_zonas: [[celdas_zona1], [celdas_zona2], ...]
+    """
+    mejor_pos = None
+    mejor_dist = 1e9
+    
+    # Combinar todas las celdas
+    todas_celdas = []
+    for zona in lista_zonas:
+        todas_celdas.extend(zona)
+    
+    for pos in todas_celdas:
+        if estado_logico[pos - 1] == 0:  # Vacía
+            dist = distancia_mm_pos(pos, x0, y0)
+            if dist < mejor_dist:
+                mejor_dist = dist
+                mejor_pos = pos
+    
+    return mejor_pos
 
 # Ranking + bootstrap + histéresis
 def calcular_ranking_estacion(est):
@@ -615,82 +652,220 @@ def calcular_ranking_estacion(est):
     ranking = sorted(conteo, key=lambda x: conteo[x], reverse=True)
     return ranking
 
-
-def actualizar_frecuencia(est, color_descargado):
-
-    # guardar historial
-    historial[est].append(color_descargado)
-
-    ranking = calcular_ranking_estacion(est)
-
-    lider_actual = zona_frecuente_color[est]
-    nuevo_lider  = ranking[0]
-
-    # aplicar histéresis
-    if lider_actual is None:
-        zona_frecuente_color[est] = nuevo_lider
-        log(f"Estación {est} -> líder inicial {nuevo_lider}")
+def actualizar_indices_estacion(est):
+    """
+    Actualiza los índices 1, 2, 3 según el historial de descargas
+    con bootstrap e histéresis
+    """
+    hist = historial[est]
+    
+    # BOOTSTRAP: primeras descargas
+    if len(hist) < 3:
+        orden = []
+        for c in hist:
+            if c not in orden:
+                orden.append(c)
+        
+        # Completar con colores faltantes
+        for c in (1, 2, 3):
+            if c not in orden:
+                orden.append(c)
+        
+        # Asignar índices
+        for idx, color in enumerate(orden[:3], start=1):
+            indices_estacion[est][idx] = color
+        
+        log(f"📊 E{est} Bootstrap → 1:{orden[0]} 2:{orden[1]} 3:{orden[2]}")
         return
-
-    # ---------- HISTÉRESIS ----------
-    conteo = {1:0, 2:0, 3:0}
-    for c in historial[est]:
+    
+    # CONTEO NORMAL
+    conteo = {1: 0, 2: 0, 3: 0}
+    for c in hist:
         conteo[c] += 1
+    
+    # Ordenar por frecuencia (mayor a menor)
+    ranking = sorted(conteo.items(), key=lambda x: x[1], reverse=True)
+    nuevo_orden = [color for color, count in ranking]
+    
+    # Estado actual
+    actual_idx1 = indices_estacion[est][1]
+    actual_idx2 = indices_estacion[est][2]
+    actual_idx3 = indices_estacion[est][3]
+    
+    nuevo_idx1 = nuevo_orden[0]
+    nuevo_idx2 = nuevo_orden[1]
+    nuevo_idx3 = nuevo_orden[2]
+    
+    # HISTÉRESIS: solo cambiar si diferencia >= HISTERESIS
+    cambio = False
+    
+    if actual_idx1 != nuevo_idx1:
+        if conteo[nuevo_idx1] >= conteo[actual_idx1] + HISTERESIS:
+            indices_estacion[est][1] = nuevo_idx1
+            cambio = True
+    
+    if actual_idx2 != nuevo_idx2:
+        if conteo[nuevo_idx2] >= conteo[actual_idx2] + HISTERESIS:
+            indices_estacion[est][2] = nuevo_idx2
+            cambio = True
+    
+    if actual_idx3 != nuevo_idx3:
+        if conteo[nuevo_idx3] >= conteo[actual_idx3] + HISTERESIS:
+            indices_estacion[est][3] = nuevo_idx3
+            cambio = True
+    
+    if cambio:
+        log(f"🔄 E{est} Índices actualizados → 1:{indices_estacion[est][1]} "
+            f"2:{indices_estacion[est][2]} 3:{indices_estacion[est][3]}")
 
-    if conteo[nuevo_lider] >= conteo[lider_actual] + HISTERESIS:
-        zona_frecuente_color[est] = nuevo_lider
-        log(f"Estación {est} -> nueva zona frecuente color {nuevo_lider}")
+def zonas_necesitan_min_causas(color):
+    """
+    Devuelve lista de estaciones cuya zona frecuente:
+    - Tiene al color como índice 1
+    - Tiene < MIN_CAUSAS cajas de ese color
+    """
+    zonas_necesitadas = []
+    
+    for est, celdas in ZONAS_FRECUENTES.items():
+        # ¿Este color es índice 1 en esta estación?
+        if indices_estacion[est][1] == color:
+            # ¿Tiene menos de MIN_CAUSAS?
+            if contar_color_en_zona(celdas, color) < MIN_CAUSAS:
+                zonas_necesitadas.append(est)
+    
+    return zonas_necesitadas
 
-    ##actualizar_panel_frecuencia()
 
 # Selección principal de celda
 def buscar_por_frecuencia(estacion, color_objetivo, x0, y0):
-
-    if color_objetivo not in (1,2,3):
-        return None
-
-    # 1) ZONAS FRECUENTES DEL COLOR con menos de MIN_CAUSAS
-    for est, celdas in ZONAS_FRECUENTES.items():
-
-        if zona_frecuente_color[est] == color_objetivo:
-
-            if contar_color_en_zona(celdas, color_objetivo) < MIN_CAUSAS:
-                pos = mejor_libre_en_lista(celdas, x0, y0)
-                if pos:
-                    log(f"Frecuencia -> mínimo zona {est} -> {pos}")
-                    return pos
-
-    # 2) ZONAS FRECUENTES DEL COLOR normales
-    for est, celdas in ZONAS_FRECUENTES.items():
-
-        if zona_frecuente_color[est] == color_objetivo:
-            pos = mejor_libre_en_lista(celdas, x0, y0)
-            if pos:
-                log(f"Frecuencia -> zona frecuente {est} -> {pos}")
-                return pos
-
-    # 2.5) si ninguna zona es líder pero hay hueco en cualquier frecuente
-    for celdas in ZONAS_FRECUENTES.values():
-        pos = mejor_libre_en_lista(celdas, x0, y0)
+    """
+    Algoritmo de frecuencia mejorado con índices 1, 2, 3
+    """
+    if color_objetivo not in (1, 2, 3):
+        # Color desconocido → zona menos frecuente
+        pos = mejor_libre_en_lista(ZONA_MENOS_FRECUENTE, x0, y0)
         if pos:
-            log(f"Frecuencia -> fallback frecuente -> {pos}")
+            log(f"Frecuencia → color desconocido → zona baja → {pos}")
             return pos
-
-    # 3) ZONA NEUTRA
-    pos = mejor_libre_en_lista(ZONA_NEUTRA, x0, y0)
-    if pos:
-        log(f"Frecuencia -> neutra -> {pos}")
+        return None
+    
+    # Determinar índice del color en esta estación
+    indice = obtener_indice_color(estacion, color_objetivo)
+    
+    # Si no hay índice asignado (bootstrap inicial)
+    if indice is None:
+        log(f"⚠️ Color {color_objetivo} sin índice en E{estacion}")
+        # Fallback: zona neutra
+        pos = mejor_libre_en_lista(ZONA_NEUTRA, x0, y0)
+        if pos:
+            return pos
+        pos = mejor_libre_en_lista(ZONA_MENOS_FRECUENTE, x0, y0)
         return pos
-
-    # 4) ZONA BAJA
-    pos = mejor_libre_en_lista(ZONA_MENOS_FRECUENTE, x0, y0)
-    if pos:
-        log(f"Frecuencia -> baja -> {pos}")
-        return pos
-
-    log("Frecuencia -> sin espacio")
+    
+    log(f"🎯 E{estacion} color {color_objetivo} → Índice {indice}")
+    
+    # ========================================
+    # ÍNDICE 1 (MÁS FRECUENTE)
+    # ========================================
+    if indice == 1:
+        # 1. Su zona frecuente
+        zona_propia = ZONAS_FRECUENTES[estacion]
+        pos = mejor_libre_en_lista(zona_propia, x0, y0)
+        if pos:
+            log(f"Frecuencia Idx1 → zona propia E{estacion} → {pos}")
+            return pos
+        
+        # 2. MIN_CAUSAS en otras zonas frecuentes
+        zonas_min = zonas_necesitan_min_causas(color_objetivo)
+        if zonas_min:
+            for est_min in zonas_min:
+                pos = mejor_libre_en_lista(ZONAS_FRECUENTES[est_min], x0, y0)
+                if pos:
+                    log(f"Frecuencia Idx1 → MIN_CAUSAS E{est_min} → {pos}")
+                    return pos
+        
+        # 3. Más cercana: zonas frecuentes de su color O zona neutra
+        zonas_opciones = [ZONAS_FRECUENTES[e] for e in ZONAS_FRECUENTES.keys()] + [ZONA_NEUTRA]
+        pos = buscar_mas_cercana_en_zonas(zonas_opciones, x0, y0)
+        if pos:
+            log(f"Frecuencia Idx1 → más cercana → {pos}")
+            return pos
+        
+        # 4. Zona menos frecuente
+        pos = mejor_libre_en_lista(ZONA_MENOS_FRECUENTE, x0, y0)
+        if pos:
+            log(f"Frecuencia Idx1 → zona baja → {pos}")
+            return pos
+        
+        # 5. Storage lleno
+        log("Frecuencia Idx1 → sin espacio")
+        return None
+    
+    # ========================================
+    # ÍNDICE 2 (FRECUENCIA MEDIA)
+    # ========================================
+    elif indice == 2:
+        # 1. MIN_CAUSAS en zonas frecuentes
+        zonas_min = zonas_necesitan_min_causas(color_objetivo)
+        if zonas_min:
+            for est_min in zonas_min:
+                pos = mejor_libre_en_lista(ZONAS_FRECUENTES[est_min], x0, y0)
+                if pos:
+                    log(f"Frecuencia Idx2 → MIN_CAUSAS E{est_min} → {pos}")
+                    return pos
+        
+        # 2. Más cercana: zonas frecuentes de su color O zona neutra
+        zonas_opciones = [ZONAS_FRECUENTES[e] for e in ZONAS_FRECUENTES.keys()] + [ZONA_NEUTRA]
+        pos = buscar_mas_cercana_en_zonas(zonas_opciones, x0, y0)
+        if pos:
+            log(f"Frecuencia Idx2 → más cercana → {pos}")
+            return pos
+        
+        # 3. Zona menos frecuente
+        pos = mejor_libre_en_lista(ZONA_MENOS_FRECUENTE, x0, y0)
+        if pos:
+            log(f"Frecuencia Idx2 → zona baja → {pos}")
+            return pos
+        
+        # 4. Storage lleno
+        log("Frecuencia Idx2 → sin espacio")
+        return None
+    
+    # ========================================
+    # ÍNDICE 3 (MENOS FRECUENTE)
+    # ========================================
+    elif indice == 3:
+        # 1. MIN_CAUSAS en zonas frecuentes
+        zonas_min = zonas_necesitan_min_causas(color_objetivo)
+        if zonas_min:
+            for est_min in zonas_min:
+                pos = mejor_libre_en_lista(ZONAS_FRECUENTES[est_min], x0, y0)
+                if pos:
+                    log(f"Frecuencia Idx3 → MIN_CAUSAS E{est_min} → {pos}")
+                    return pos
+        
+        # 2. Más cercana: zonas frecuentes de su color O zona menos frecuente
+        zonas_opciones = [ZONAS_FRECUENTES[e] for e in ZONAS_FRECUENTES.keys()] + [ZONA_MENOS_FRECUENTE]
+        pos = buscar_mas_cercana_en_zonas(zonas_opciones, x0, y0)
+        if pos:
+            log(f"Frecuencia Idx3 → más cercana → {pos}")
+            return pos
+        
+        # 3. Storage lleno
+        log("Frecuencia Idx3 → sin espacio")
+        return None
+    
     return None
 
+def actualizar_frecuencia(est, color_descargado):
+    """
+    Actualiza historial e índices después de cada descarga
+    """
+    # Guardar en historial
+    historial[est].append(color_descargado)
+    
+    # Actualizar índices
+    actualizar_indices_estacion(est)
 
 # ================= FUNCIÓN UNIFICADA =================
 def movimiento_auto(estacion, accion, color_sel=None):
@@ -942,8 +1117,8 @@ def reset_grid():
     for k in historial:
         historial[k].clear()
 
-    for k in zona_frecuente_color:
-        zona_frecuente_color[k] = None
+    for est in indices_estacion:
+        indices_estacion[est] = {1: None, 2: None, 3: None}
 
     # limpiar instrucciones pendientes
     lista_instrucciones.clear()
