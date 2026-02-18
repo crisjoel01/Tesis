@@ -648,12 +648,14 @@ def cambiar_zona():
     global ZONA_ACTIVA
     ZONA_ACTIVA = zona_var.get()
     log(f"Zona activa -> {ZONA_ACTIVA}")
+    actualizar_grid() 
 
 def cambiar_algoritmo():
     global ALGORITMO_ACTUAL
     ALGORITMO_ACTUAL = algoritmo_var.get()
     log(f"Algoritmo -> {ALGORITMO_ACTUAL}")
     actualizar_panel_dinamico()
+    actualizar_grid()
 
 def ejecutar_lista():
     global indice_instruccion_actual, total_instrucciones
@@ -737,6 +739,66 @@ def continuar():
 FILAS = 5
 COLUMNAS = 10
 celdas_ui = []
+fondos_grid_ui = []
+
+def obtener_color_zona(num_celda, algoritmo):
+    """Retorna el color de fondo según el algoritmo y la celda"""
+    
+    if algoritmo == "zonas":
+        zona = zona_por_pos(num_celda)
+        colores_zona = {
+            1: "#FFB3B3",  # Rosa
+            2: "#B3FFB3",  # Verde
+            3: "#B3B3FF",  # Azul
+            4: "#FFFFB3",  # Amarillo
+            5: "#FFB3FF"   # Magenta
+        }
+        
+        # Resaltar zona activa con color más intenso
+        if zona == ZONA_ACTIVA:
+            colores_activas = {
+                1: "#FF6666",  # Rosa intenso
+                2: "#66FF66",  # Verde intenso
+                3: "#6666FF",  # Azul intenso
+                4: "#FFFF66",  # Amarillo intenso
+                5: "#FF66FF"   # Magenta intenso
+            }
+            return colores_activas.get(zona, "#FF8800")
+        
+        return colores_zona.get(zona, "lightgray")
+    
+    elif algoritmo == "producto":
+        producto = producto_por_columnas(num_celda)
+        colores_producto = {
+            1: "#FF9999",  # Rojo (producto rojo)
+            2: "#99FF99",  # Verde (producto verde)
+            3: "#9999FF",  # Azul (producto azul)
+            4: "#FFFF99"   # Amarillo (desconocido)
+        }
+        return colores_producto.get(producto, "lightgray")
+    
+    elif algoritmo == "frecuencia":
+        # Mapeo de zonas según la imagen:
+        # Zona menos frecuente: celdas 31-50 (gris oscuro)
+        # Zona neutra: celdas 7,17,21-30 (amarillo)
+        # Zona frecuente 1: celdas 1-3,11-13 (rosa)
+        # Zona frecuente 2: celdas 4-6,14-16 (verde)
+        # Zona frecuente 3: celdas 8-10,18-20 (azul)
+        
+        if num_celda in ZONA_MENOS_FRECUENTE:  # 31-50
+            return "#A0A0A0"  # Gris oscuro para zona menos frecuente
+        elif num_celda in ZONA_NEUTRA:  # 7,17,21-30
+            return "#FFFF99"  # Amarillo para zona neutra
+        elif num_celda in ZONAS_FRECUENTES.get(1, []):  # 1-3,11-13
+            return "#FFB3B3"  # Rosa para zona frecuente 1
+        elif num_celda in ZONAS_FRECUENTES.get(2, []):  # 4-6,14-16
+            return "#B3FFB3"  # Verde para zona frecuente 2
+        elif num_celda in ZONAS_FRECUENTES.get(3, []):  # 8-10,18-20
+            return "#B3B3FF"  # Azul para zona frecuente 3
+        else:
+            return "lightgray"
+    
+    return "lightgray"  # Por defecto
 
 def color_celda(v):
     colores = {0: "gray", 1: "red", 2: "green", 3: "blue", 4: "yellow"}
@@ -749,22 +811,48 @@ def texto_contraste(bg_color):
         return "black"
 
 def actualizar_grid():
+    """Actualiza el grid mostrando el estado de las celdas y el sombreado alrededor"""
+    algoritmo = algoritmo_var.get()
+    
     for i, valor in enumerate(estado_logico):
+        num_celda = i + 1  # ¡Esto es clave! La celda 1 está en índice 0
+        
+        # Actualizar COLOR DEL FONDO (alrededor de la celda)
+        if fondos_grid_ui and i < len(fondos_grid_ui):
+            fondo_color = obtener_color_zona(num_celda, algoritmo)
+            fondos_grid_ui[i].config(bg=fondo_color)
+        
+        # Actualizar CELDA (estado)
         bg = color_celda(valor)
         fg = texto_contraste(bg)
         celdas_ui[i].config(bg=bg, fg=fg)
+    
     actualizar_panel_dinamico()
-
+    
 def crear_grid(parent):
+    """Crea el grid con frames de fondo coloreados entre las celdas"""
+    global fondos_grid_ui
+    
+    # Crear array temporal para fondos
+    temp_fondos = [None] * TOTAL_CELDAS
     temp_celdas = [None] * TOTAL_CELDAS
     
     for r in range(FILAS):
         for c in range(COLUMNAS):
-            fila_real = FILAS - 1 - r
-            num_celda = fila_real * COLUMNAS + c + 1
+            # Esta es la fila visual (r=0 es arriba, r=4 es abajo)
+            # Pero num_celda debe calcularse de abajo hacia arriba
+            fila_logica = FILAS - 1 - r  # r=4 → 0 (abajo), r=0 → 4 (arriba)
+            num_celda = fila_logica * COLUMNAS + c + 1
+            indice_array = num_celda - 1  # Índice 0 para celda 1
             
+            # Frame de fondo (este es el que se coloreará)
+            frame_fondo = tk.Frame(parent, bg="lightgray", padx=3, pady=3)
+            frame_fondo.grid(row=r, column=c, padx=2, pady=2, sticky="nsew")
+            temp_fondos[indice_array] = frame_fondo  # Guardar en orden correcto
+            
+            # Celda encima del frame de fondo
             lbl = tk.Label(
-                parent,
+                frame_fondo,
                 text=str(num_celda),
                 width=6,
                 height=3,
@@ -773,12 +861,13 @@ def crear_grid(parent):
                 relief="ridge",
                 font=("Arial", 10, "bold")
             )
-            lbl.grid(row=r, column=c, padx=1, pady=1)
-            temp_celdas[num_celda - 1] = lbl
+            lbl.pack(fill="both", expand=True)
+            temp_celdas[indice_array] = lbl  # Guardar en orden correcto
     
+    fondos_grid_ui = temp_fondos
     celdas_ui.clear()
     celdas_ui.extend(temp_celdas)
-
+    
 def generar_lista_random():
     try:
         n = int(entry_cantidad.get())
@@ -844,22 +933,51 @@ def copiar_log():
     log("📋 Log copiado al portapapeles")
 
 def reset_grid():
-    global heatmap_data
+    global heatmap_data, stats_por_algoritmo, ciclos_totales, tiempo_total
+    global indice_instruccion_actual, total_instrucciones
+    
+    # Vaciar almacén
     for i in range(TOTAL_CELDAS):
         presencia[i] = 0
         color[i] = 0
         estado_logico[i] = 0
+    
+    # Reiniciar historial de frecuencia
     for k in historial:
         historial[k].clear()
+    
+    # Reiniciar índices de estaciones
     for est in indices_estacion:
         indices_estacion[est] = {1: None, 2: None, 3: None}
+    
+    # Reiniciar heatmap
     heatmap_data = [0] * TOTAL_CELDAS
+    
+    # Reiniciar lista de instrucciones
     lista_instrucciones.clear()
+    
+    # 🔴 NUEVO: Reiniciar estadísticas
+    stats_por_algoritmo = {
+        "zonas": {"ciclos": 0, "tiempo_total": 0, "cargas": 0, "descargas": 0},
+        "producto": {"ciclos": 0, "tiempo_total": 0, "cargas": 0, "descargas": 0},
+        "frecuencia": {"ciclos": 0, "tiempo_total": 0, "cargas": 0, "descargas": 0}
+    }
+    
+    # 🔴 NUEVO: Reiniciar contadores globales
+    ciclos_totales = 0
+    tiempo_total = 0
+    indice_instruccion_actual = 0
+    total_instrucciones = 0
+    
+    # Actualizar toda la interfaz
     actualizar_grid()
     actualizar_lista_ui()
     actualizar_heatmap()
+    actualizar_metricas()  # Actualiza lbl_ocup, lbl_colores, etc.
+    actualizar_estadisticas()  # Actualiza todas las pestañas de estadísticas
+    
     guardar_estado()
-    log("🧹 Grid reseteado → almacén vacío")
+    log("🧹 Sistema reseteado completamente → almacén vacío y estadísticas reiniciadas")
 
 # ================= CONFIGURACIÓN - APLICAR CAMBIOS =================
 def aplicar_configuracion():
@@ -926,7 +1044,15 @@ def restablecer_valores():
 
 # ===================== funciones extra ===================
 def reset_ui_con_confirmacion():
-    if messagebox.askyesno("Confirmar", "¿Estás seguro de resetear todo el almacén?\nSe perderán todas las cajas y el historial."):
+    if messagebox.askyesno("Confirmar Reset", 
+                          "¿Estás seguro de resetear TODO el sistema?\n\n"
+                          "Se perderán:\n"
+                          "• Todas las cajas del almacén\n"
+                          "• El historial de frecuencia\n"
+                          "• Las estadísticas de todos los algoritmos\n"
+                          "• Los contadores de ciclos y tiempo\n"
+                          "• El heatmap de accesos\n"
+                          "• La lista de instrucciones"):
         reset_ui()
 
 def ejecutar_o_continuar():
@@ -942,11 +1068,22 @@ def pausar_ui():
     btn_run.config(text="Continuar")
 
 def home_ui():
-    global pos_actual_x, pos_actual_y
-    enviar_comando(HOME)
-    pos_actual_x = 0
-    pos_actual_y = 0
-    log("🏠 Home manual")
+    """Envía el comando HOME en un thread separado para no bloquear la UI"""
+    # Deshabilitar botón temporalmente
+    btn_home.config(state="disabled", text="Home...")
+    
+    def worker():
+        global pos_actual_x, pos_actual_y
+        enviar_comando(HOME)
+        pos_actual_x = 0
+        pos_actual_y = 0
+        log("🏠 Home completado")
+        
+        # Re-habilitar botón
+        btn_home.config(state="normal", text="Home")
+    
+    threading.Thread(target=worker, daemon=True).start()
+    log("🏠 Enviando comando Home...")
 
 def reset_ui():
     global pausado
