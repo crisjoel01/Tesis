@@ -10,12 +10,13 @@
 #define Dir 7    
 
 // Pines Nema 2 ESTACION 2
-#define Step2 3    
-#define Dir2 6    
+#define Step2 2    
+#define Dir2 5
+
 
 // Pines Nema 3 ESTACION 3
-#define Step3 2    
-#define Dir3 5  
+#define Step3 3    
+#define Dir3 6  
 #define Enable 8 
 
 // Declaración de servomotores
@@ -24,12 +25,12 @@ Servo servogarra2;
 Servo servogarra3;
 
 // Pines para los finales de carrera (configuración Pull-Up)
-const int FC1 = 11;   //  Estacion 1 arriba
+const int FC1 = 51;   //  Estacion 1 arriba
 const int FC2 = 10;  //  Estacion 2 arriba
 const int FC3 = 9;  //  Estacion 3 arriba
 const int FC4 = 39;  //  Estacion 1 abajo
-const int FC5 = 37;  //  Estacion 2 abajo
-const int FC6 = 35;  //  Estacion 3 abajo
+const int FC5 = 35;  //  Estacion 2 abajo
+const int FC6 = 37;  //  Estacion 3 abajo
 
 // Variables de funcionamiento de motores NEMA 17
 int retardo = 700;   // Menor numero = más rápido

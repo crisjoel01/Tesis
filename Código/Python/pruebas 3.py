@@ -11,6 +11,7 @@ from tkinter import messagebox
 import random
 import json
 import os
+import queue
 import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -83,6 +84,12 @@ tiempo_total = 0
 operacion_actual = "IDLE"
 pausado = False
 
+# =====================================================
+# Variables para pausa (simplificado)
+# =====================================================
+pausa_event = threading.Event()
+pausa_event.set()  # Iniciamos sin pausa
+
 indice_instruccion_actual = 0
 total_instrucciones = 0
 existe_lista_en_curso = False
@@ -95,11 +102,21 @@ stats_por_algoritmo = {
 }
 
 # ========= Heatmap =========
-heatmap_data = [0] * TOTAL_CELDAS  # Contador de accesos por celda
+heatmap_data = [0] * TOTAL_CELDAS
 
 # ========= Estados de estaciones ===============
 estado_estaciones = {1: "rojo", 2: "rojo", 3: "rojo"}
 lbl_estaciones = {}
+
+# ================= SERIAL =================
+puerto = None
+
+# =====================================================
+# FUNCIÓN PARA ACTUALIZAR UI DESDE CUALQUIER LADO
+# =====================================================
+def ui_safe(func, *args, **kwargs):
+    """Ejecuta func en el hilo principal de Tkinter de forma segura."""
+    root.after(0, lambda: func(*args, **kwargs))
 
 def actualizar_estado_estacion(num_estacion, estado):
     """Actualiza el color de la estación (rojo=parado, verde=moviendo)"""
@@ -111,8 +128,8 @@ def actualizar_estado_estacion(num_estacion, estado):
             lbl_estaciones[num_estacion].config(bg="red", fg="white")
 
 def esperar_si_pausado():
-    while pausado:
-        root.update()
+    """Bloquea si está pausado"""
+    pausa_event.wait()
 
 # ====== guardar estado ======
 def guardar_estado():
@@ -153,9 +170,6 @@ def cargar_estado():
     actualizar_lista_ui()
     log("📂 Estado restaurado")
 
-# ================= SERIAL =================
-puerto = None
-
 # ================= UTILIDADES =================
 def mm_a_pasos(mm):
     return int(mm * PASOS_POR_MM)
@@ -171,10 +185,14 @@ def actualizar_estado_logico():
             estado_logico[i] = 4
     log("Estado lógico actualizado")
 
-# ================= SERIAL CORE =================
+# ================= SERIAL CORE (SIMPLIFICADO - SIN THREAD) =================
 def enviar_comando(op, pasos=0):
+    """
+    Envía un comando y espera respuesta (bloqueante)
+    """
     esperar_si_pausado()
     
+    # Actualizar UI de estaciones
     if op in [7, 10, 13, 16]:
         actualizar_estado_estacion(1, "verde")
     elif op in [8, 11, 14, 17]:
@@ -184,39 +202,53 @@ def enviar_comando(op, pasos=0):
     
     if puerto is None or not puerto.is_open:
         log("ERROR: Puerto serial no disponible")
-        return
-
+        return None
+    
     mensaje = f"op:{op},pasos:{pasos}\n"
     puerto.write(mensaje.encode())
     log(f"→ {mensaje.strip()}")
     set_estado(False)
-
+    
     color_detectado = None
     ack_recibido = False
     color_recibido = False
     requiere_color = op in (19, 20, 21)
-
+    
     while True:
+
         if puerto.in_waiting:
             resp = puerto.readline().decode().strip()
             log(f"Arduino → {resp}")
+
+            # ---- COLOR ----
             if resp.startswith("C:"):
                 color_detectado = int(resp.split(":")[1])
                 color_recibido = True
+
+            # ---- ACK ----
             elif resp == "ACK:1":
                 ack_recibido = True
+
                 if op == HOME:
                     global pos_actual_x, pos_actual_y
                     pos_actual_x = 0
                     pos_actual_y = 0
+
+        # lógica de salida
         if requiere_color:
             if ack_recibido and color_recibido:
                 break
         else:
             if ack_recibido:
                 break
+
         time.sleep(0.01)
 
+    
+    if not ack_recibido:
+        log(f"⚠️ Timeout en comando {op}")
+    
+    # Actualizar UI de estaciones después de terminar
     if op in [7, 10, 13, 16]:
         actualizar_estado_estacion(1, "rojo")
     elif op in [8, 11, 14, 17]:
@@ -231,29 +263,43 @@ def enviar_comando(op, pasos=0):
 def leer_sensores():
     if puerto is None or not puerto.is_open:
         return
-    puerto.write(f"op:{LEER_SENSORES},pasos:0\n".encode())
-    inicio = time.time()
-    while time.time() - inicio < 3:
-        if puerto.in_waiting:
-            linea = puerto.readline().decode().strip()
-            log(f"Arduino → {linea}")
-            if linea.startswith("SENSORS:"):
-                datos = linea.replace("SENSORS:", "").split(',')
-                for i in range(min(len(datos), TOTAL_CELDAS)):
-                    presencia[i] = int(datos[i])
-                actualizar_estado_logico()
-                actualizar_grid()
-                log("Sensores OK")
-                return
-        time.sleep(0.01)
-    log("Sensores tardaron pero continuo sin bloquear")
+    
+    enviar_comando(LEER_SENSORES, 0)
+    
+    # La respuesta se maneja en enviar_comando
+    log("Sensores OK")
+    actualizar_estado_logico()
+    actualizar_grid()
 
 # ================= MOVIMIENTOS BASE =================
+def mover_a(x_dest_mm, y_dest_mm):
+    global pos_actual_x, pos_actual_y
+    
+    dx = x_dest_mm - pos_actual_x
+    dy = y_dest_mm - pos_actual_y
+    
+    if dy > 0:
+        enviar_comando(SUBIR, mm_a_pasos(dy))
+    elif dy < 0:
+        enviar_comando(BAJAR, mm_a_pasos(abs(dy)))
+    
+    if dx > 0:
+        enviar_comando(DERECHA, mm_a_pasos(dx))
+    elif dx < 0:
+        enviar_comando(IZQUIERDA, mm_a_pasos(abs(dx)))
+    
+    pos_actual_x = x_dest_mm
+    pos_actual_y = y_dest_mm
+    
+    # Pequeña pausa para dar tiempo al Arduino
+    time.sleep(0.05)
+
 def ir_a_estacion(estacion):
     global pos_actual_x, pos_actual_y
     enviar_comando(HOME)
     pos_actual_x = 0
     pos_actual_y = 0
+    
     enviar_comando(SUBIR, mm_a_pasos(Y_ESTACION_MM[estacion]))
     enviar_comando(DERECHA, mm_a_pasos(X_ESTACIONES_MM[estacion]))
     pos_actual_x = X_ESTACIONES_MM[estacion]
@@ -273,9 +319,11 @@ def ir_a_storage(posicion):
     columna = (posicion - 1) % ESPACIOS_X
     y_mm = Y_INICIAL_MM + sum(ALTURAS_MM[:fila])
     x_mm = X_INICIAL_MM + columna * DX_MM
+    
     enviar_comando(HOME)
     pos_actual_x = 0
     pos_actual_y = 0
+    
     enviar_comando(SUBIR, mm_a_pasos(y_mm))
     enviar_comando(DERECHA, mm_a_pasos(x_mm))
     pos_actual_x = x_mm
@@ -290,21 +338,6 @@ def ir_a_storage_directo(posicion):
     global pos_actual_x, pos_actual_y
     pos_actual_x = x
     pos_actual_y = y
-
-def mover_a(x_dest_mm, y_dest_mm):
-    global pos_actual_x, pos_actual_y
-    dx = x_dest_mm - pos_actual_x
-    dy = y_dest_mm - pos_actual_y
-    if dy > 0:
-        enviar_comando(SUBIR, mm_a_pasos(dy))
-    elif dy < 0:
-        enviar_comando(BAJAR, mm_a_pasos(abs(dy)))
-    if dx > 0:
-        enviar_comando(DERECHA, mm_a_pasos(dx))
-    elif dx < 0:
-        enviar_comando(IZQUIERDA, mm_a_pasos(abs(dx)))
-    pos_actual_x = x_dest_mm
-    pos_actual_y = y_dest_mm
 
 def buscar_caja_mas_cercana(color_objetivo, x0, y0):
     mejor_pos = None
@@ -325,25 +358,40 @@ def coords_estacion(estacion):
     return X_ESTACIONES_MM[estacion], Y_ESTACION_MM[estacion]
 
 # ================= CICLOS =================
+
+def _actualizar_progreso_ui(progreso, idx, total):
+    """Actualiza la barra de progreso e instrucción actual (solo desde hilo principal)."""
+    progress_bar['value'] = progreso
+    progress_label.config(text=f"{progreso}%")
+    lbl_instruccion_actual.config(text=f"Instrucción actual: {idx}/{total}")
+
 def ciclo_carga(estacion):
     global pos_actual_x, pos_actual_y, operacion_actual, ciclos_totales, tiempo_total
     global indice_instruccion_actual, total_instrucciones
     inicio = time.time()
-    
+
     if total_instrucciones > 0:
         progreso = int((indice_instruccion_actual / total_instrucciones) * 100)
-        progress_bar['value'] = progreso
-        progress_label.config(text=f"{progreso}%")
-        lbl_instruccion_actual.config(text=f"Instrucción actual: {indice_instruccion_actual}/{total_instrucciones}")
-        
+        ui_safe(_actualizar_progreso_ui, progreso, indice_instruccion_actual, total_instrucciones)
+
     operacion_actual = "CARGA"
+    
+    # Secuencia de comandos para carga
     ir_a_estacion_directo(estacion)
+    
+    # Carga en estación
     enviar_comando(CARGA_ESTACION[estacion])
+    
+    # Leer color
     color_detectado = enviar_comando(LEER_COLOR_ESTACION[estacion])
+    
     if color_detectado is None:
         log("Color no detectado")
         color_detectado = 4
+    
+    # Elegir posición
     posicion = elegir_posicion(color_detectado, estacion)
+    
     if posicion is None:
         log("Carga cancelada → zona sin espacio")
         enviar_comando(DESCARGA_ESTACION[estacion])
@@ -351,77 +399,102 @@ def ciclo_carga(estacion):
         pos_actual_x = 0
         pos_actual_y = 0
         return
+    
+    # Pasar a cartesiano
     enviar_comando(PASAR_CARTESIANO[estacion])
+    
+    # Ir a storage
     ir_a_storage_directo(posicion)
+    
+    # Manipulación de garra
     enviar_comando(SACAR_GARRA)
     enviar_comando(BAJAR, mm_a_pasos(20))
     enviar_comando(METER_GARRA)
+    
+    # Actualizar estado
     presencia[posicion-1] = 1
     color[posicion-1] = color_detectado
-    heatmap_data[posicion-1] += 1  # Actualizar heatmap
+    heatmap_data[posicion-1] += 1
     actualizar_estado_logico()
-    actualizar_grid()
-    actualizar_heatmap()
+
+    ui_safe(actualizar_grid)
+    ui_safe(actualizar_heatmap)
+
     operacion_actual = "HOME"
     enviar_comando(HOME)
     pos_actual_x = 0
     pos_actual_y = 0
+    
+    # Actualizar estadísticas
     ciclos_totales += 1
     tiempo_total += (time.time() - inicio)
     stats_por_algoritmo[ALGORITMO_ACTUAL]["ciclos"] += 1
     stats_por_algoritmo[ALGORITMO_ACTUAL]["tiempo_total"] += (time.time() - inicio)
     stats_por_algoritmo[ALGORITMO_ACTUAL]["cargas"] += 1
+    
     operacion_actual = "IDLE"
     indice_instruccion_actual += 1
-    actualizar_metricas()
-    actualizar_estadisticas()
+
+    ui_safe(actualizar_metricas)
+    ui_safe(actualizar_estadisticas)
 
 def ciclo_descarga(estacion, color_solicitado):
     global pos_actual_x, pos_actual_y, operacion_actual, ciclos_totales, tiempo_total
     global indice_instruccion_actual, total_instrucciones
     inicio = time.time()
-    
+
     if total_instrucciones > 0:
         progreso = int((indice_instruccion_actual / total_instrucciones) * 100)
-        progress_bar['value'] = progreso
-        progress_label.config(text=f"{progreso}%")
-        lbl_instruccion_actual.config(text=f"Instrucción actual: {indice_instruccion_actual}/{total_instrucciones}")
-        
+        ui_safe(_actualizar_progreso_ui, progreso, indice_instruccion_actual, total_instrucciones)
+
     operacion_actual = "DESCARGA"
     x_est, y_est = coords_estacion(estacion)
     pos = buscar_caja_mas_cercana(color_solicitado, x_est, y_est)
+    
     if pos is None:
         log("No hay cajas de ese color")
         return
+    
     ir_a_storage_directo(pos)
+    
+    # Manipulación de garra
     enviar_comando(BAJAR, mm_a_pasos(20))
     enviar_comando(SACAR_GARRA)
     enviar_comando(SUBIR, mm_a_pasos(20))
     enviar_comando(METER_GARRA)
+    
+    # Actualizar estado
     presencia[pos-1] = 0
     color[pos-1] = 0
-    heatmap_data[pos-1] += 1  # Actualizar heatmap
+    heatmap_data[pos-1] += 1
     actualizar_frecuencia(estacion, color_solicitado)
     actualizar_estado_logico()
-    actualizar_grid()
-    actualizar_heatmap()
+
+    ui_safe(actualizar_grid)
+    ui_safe(actualizar_heatmap)
+
     ir_a_estacion_directo(estacion)
     enviar_comando(SUBIR, mm_a_pasos(10))
     enviar_comando(PASAR_ESTACION[estacion])
     enviar_comando(DESCARGA_ESTACION[estacion])
+    
     operacion_actual = "HOME"
     enviar_comando(HOME)
     pos_actual_x = 0
     pos_actual_y = 0
+    
+    # Actualizar estadísticas
     ciclos_totales += 1
     tiempo_total += (time.time() - inicio)
     stats_por_algoritmo[ALGORITMO_ACTUAL]["ciclos"] += 1
     stats_por_algoritmo[ALGORITMO_ACTUAL]["tiempo_total"] += (time.time() - inicio)
     stats_por_algoritmo[ALGORITMO_ACTUAL]["descargas"] += 1
+    
     operacion_actual = "IDLE"
     indice_instruccion_actual += 1
-    actualizar_metricas()
-    actualizar_estadisticas()
+
+    ui_safe(actualizar_metricas)
+    ui_safe(actualizar_estadisticas)
 
 # =============== SELECCION DE ALGORITMO ==============
 def elegir_posicion(color_detectado, estacion):
@@ -606,13 +679,19 @@ def conectar_serial():
     global puerto, pos_actual_x, pos_actual_y
     try:
         puerto_sel = combo_puertos.get()
-        puerto = serial.Serial(puerto_sel, 115200, timeout=1)
-        time.sleep(2)
+        puerto = serial.Serial(puerto_sel, 115200, timeout=3)
+        time.sleep(2)  # Esperar a que Arduino se reinicie
+        
+        # Limpiar buffer
+        puerto.reset_input_buffer()
+        puerto.reset_output_buffer()
+        
         lbl_serial.config(text="ONLINE", bg="green")
         btn_serial.config(text="DESCONECTAR")
         log(f"Conectado a {puerto_sel}")
         pos_actual_x = 0
         pos_actual_y = 0
+        
     except Exception as e:
         puerto = None
         log(f"Error: {e}")
@@ -648,40 +727,47 @@ def cambiar_zona():
     global ZONA_ACTIVA
     ZONA_ACTIVA = zona_var.get()
     log(f"Zona activa -> {ZONA_ACTIVA}")
+    actualizar_grid()
 
 def cambiar_algoritmo():
     global ALGORITMO_ACTUAL
     ALGORITMO_ACTUAL = algoritmo_var.get()
     log(f"Algoritmo -> {ALGORITMO_ACTUAL}")
     actualizar_panel_dinamico()
+    actualizar_grid()
 
 def ejecutar_lista():
     global indice_instruccion_actual, total_instrucciones
-    
+
     if not lista_instrucciones:
         log("No hay instrucciones para ejecutar")
         return
-    
+
     total_instrucciones = len(lista_instrucciones)
     indice_instruccion_actual = 1
-    
+
     frame_progreso.pack(fill="x", padx=5, pady=2)
     progress_bar['value'] = 0
     progress_label.config(text="0%")
     lbl_instruccion_actual.config(text=f"Instrucción actual: 1/{total_instrucciones}")
-    
+
     def worker():
         for tipo, est, col in lista_instrucciones:
             if tipo == "carga":
                 ciclo_carga(est)
             else:
                 ciclo_descarga(est, col)
-        
+
         log("✅ Lista completada")
+        
+        def _ocultar_progreso():
+            frame_progreso.pack_forget()
+            lbl_instruccion_actual.config(text="Instrucción actual: --/--")
+        
         time.sleep(2)
-        frame_progreso.pack_forget()
-        lbl_instruccion_actual.config(text="Instrucción actual: --/--")
-    
+        ui_safe(_ocultar_progreso)
+
+    # ÚNICO HILO EN TODO EL PROGRAMA
     threading.Thread(target=worker, daemon=True).start()
 
 def cerrar_programa():
@@ -699,13 +785,12 @@ def actualizar_metricas():
     r = color.count(1)
     v = color.count(2)
     a = color.count(3)
-    
+
     porcentaje = (ocup / 50) * 100
     lbl_ocup.config(text=f"Ocupación: {ocup}/50 ({porcentaje:.0f}%)")
-    
     lbl_colores.config(text=f"Cajas -> Rojo:{r}  Verde:{v}  Azul:{a}")
     lbl_ciclos.config(text=f"Ciclos: {ciclos_totales}")
-    
+
     if ciclos_totales > 0:
         prom = tiempo_total / ciclos_totales
         lbl_tprom.config(text=f"T ciclo promedio: {prom:.2f} s")
@@ -713,30 +798,79 @@ def actualizar_metricas():
     else:
         lbl_tprom.config(text="T ciclo promedio: 0.0 s")
         lbl_rate.config(text="Throughput: 0/min")
-    
+
     lbl_op.config(text=f"Operación: {operacion_actual}")
     if operacion_actual == "IDLE":
         lbl_op.config(fg="blue")
     else:
         lbl_op.config(fg="green")
-    
-    # ✅ NUEVO: Actualizar estadísticas y gráficas
+
     actualizar_estadisticas()
-        
+
 def pausar():
     global pausado
     pausado = True
+    pausa_event.clear()   # Bloquea el worker thread
     log("⏸ Pausado")
 
 def continuar():
     global pausado
     pausado = False
+    pausa_event.set()     # Desbloquea el worker thread
     log("▶ Continuar")
 
 # =================== STORAGE GRID ===================
 FILAS = 5
 COLUMNAS = 10
 celdas_ui = []
+fondos_grid_ui = []
+
+def obtener_color_zona(num_celda, algoritmo):
+    if algoritmo == "zonas":
+        zona = zona_por_pos(num_celda)
+        colores_zona = {
+            1: "#FFB3B3",
+            2: "#B3FFB3",
+            3: "#B3B3FF",
+            4: "#FFFFB3",
+            5: "#FFB3FF"
+        }
+        if zona == ZONA_ACTIVA:
+            colores_activas = {
+                1: "#FF6666",
+                2: "#66FF66",
+                3: "#6666FF",
+                4: "#FFFF66",
+                5: "#FF66FF"
+            }
+            return colores_activas.get(zona, "#FF8800")
+        return colores_zona.get(zona, "lightgray")
+
+    elif algoritmo == "producto":
+        producto = producto_por_columnas(num_celda)
+        colores_producto = {
+            1: "#FF9999",
+            2: "#99FF99",
+            3: "#9999FF",
+            4: "#FFFF99"
+        }
+        return colores_producto.get(producto, "lightgray")
+
+    elif algoritmo == "frecuencia":
+        if num_celda in ZONA_MENOS_FRECUENTE:
+            return "#A0A0A0"
+        elif num_celda in ZONA_NEUTRA:
+            return "#FFFF99"
+        elif num_celda in ZONAS_FRECUENTES.get(1, []):
+            return "#FFB3B3"
+        elif num_celda in ZONAS_FRECUENTES.get(2, []):
+            return "#B3FFB3"
+        elif num_celda in ZONAS_FRECUENTES.get(3, []):
+            return "#B3B3FF"
+        else:
+            return "lightgray"
+
+    return "lightgray"
 
 def color_celda(v):
     colores = {0: "gray", 1: "red", 2: "green", 3: "blue", 4: "yellow"}
@@ -749,22 +883,34 @@ def texto_contraste(bg_color):
         return "black"
 
 def actualizar_grid():
+    algoritmo = algoritmo_var.get()
     for i, valor in enumerate(estado_logico):
+        num_celda = i + 1
+        if fondos_grid_ui and i < len(fondos_grid_ui):
+            fondo_color = obtener_color_zona(num_celda, algoritmo)
+            fondos_grid_ui[i].config(bg=fondo_color)
         bg = color_celda(valor)
         fg = texto_contraste(bg)
         celdas_ui[i].config(bg=bg, fg=fg)
     actualizar_panel_dinamico()
 
 def crear_grid(parent):
+    global fondos_grid_ui
+    temp_fondos = [None] * TOTAL_CELDAS
     temp_celdas = [None] * TOTAL_CELDAS
-    
+
     for r in range(FILAS):
         for c in range(COLUMNAS):
-            fila_real = FILAS - 1 - r
-            num_celda = fila_real * COLUMNAS + c + 1
-            
+            fila_logica = FILAS - 1 - r
+            num_celda = fila_logica * COLUMNAS + c + 1
+            indice_array = num_celda - 1
+
+            frame_fondo = tk.Frame(parent, bg="lightgray", padx=3, pady=3)
+            frame_fondo.grid(row=r, column=c, padx=2, pady=2, sticky="nsew")
+            temp_fondos[indice_array] = frame_fondo
+
             lbl = tk.Label(
-                parent,
+                frame_fondo,
                 text=str(num_celda),
                 width=6,
                 height=3,
@@ -773,9 +919,10 @@ def crear_grid(parent):
                 relief="ridge",
                 font=("Arial", 10, "bold")
             )
-            lbl.grid(row=r, column=c, padx=1, pady=1)
-            temp_celdas[num_celda - 1] = lbl
-    
+            lbl.pack(fill="both", expand=True)
+            temp_celdas[indice_array] = lbl
+
+    fondos_grid_ui = temp_fondos
     celdas_ui.clear()
     celdas_ui.extend(temp_celdas)
 
@@ -801,7 +948,7 @@ def actualizar_lista_ui():
             colores = {1: "Rojo", 2: "Verde", 3: "Azul"}
             texto = f"{i}. DESCARGA -> Estación {est} ({colores[col]})"
         text_instr.insert(tk.END, texto + "\n")
-        
+
     if 'text_lista_config' in globals() and text_lista_config.winfo_exists():
         text_lista_config.delete("1.0", tk.END)
         text_lista_config.insert(tk.END, text_instr.get("1.0", tk.END))
@@ -844,90 +991,111 @@ def copiar_log():
     log("📋 Log copiado al portapapeles")
 
 def reset_grid():
-    global heatmap_data
+    global heatmap_data, stats_por_algoritmo, ciclos_totales, tiempo_total
+    global indice_instruccion_actual, total_instrucciones
+
     for i in range(TOTAL_CELDAS):
         presencia[i] = 0
         color[i] = 0
         estado_logico[i] = 0
+
     for k in historial:
         historial[k].clear()
+
     for est in indices_estacion:
         indices_estacion[est] = {1: None, 2: None, 3: None}
+
     heatmap_data = [0] * TOTAL_CELDAS
     lista_instrucciones.clear()
+
+    stats_por_algoritmo = {
+        "zonas": {"ciclos": 0, "tiempo_total": 0, "cargas": 0, "descargas": 0},
+        "producto": {"ciclos": 0, "tiempo_total": 0, "cargas": 0, "descargas": 0},
+        "frecuencia": {"ciclos": 0, "tiempo_total": 0, "cargas": 0, "descargas": 0}
+    }
+
+    ciclos_totales = 0
+    tiempo_total = 0
+    indice_instruccion_actual = 0
+    total_instrucciones = 0
+
     actualizar_grid()
     actualizar_lista_ui()
     actualizar_heatmap()
+    actualizar_metricas()
+    actualizar_estadisticas()
+
     guardar_estado()
-    log("🧹 Grid reseteado → almacén vacío")
+    log("🧹 Sistema reseteado completamente → almacén vacío y estadísticas reiniciadas")
 
 # ================= CONFIGURACIÓN - APLICAR CAMBIOS =================
 def aplicar_configuracion():
-    """Aplica los valores de configuración a las variables globales"""
     global MIN_CAUSAS, HISTERESIS, HIST_N, PASOS_POR_MM
     global ALTURAS_MM, Y_ESTACION_MM, X_ESTACIONES_MM
-    
+
     try:
-        # Parámetros de algoritmos
         MIN_CAUSAS = int(min_causas_var.get())
         HISTERESIS = int(histeresis_var.get())
         nuevo_hist_n = int(hist_n_var.get())
-        
+
         if nuevo_hist_n != HIST_N:
             HIST_N = nuevo_hist_n
             for k in historial:
                 historial[k] = deque(list(historial[k])[-HIST_N:], maxlen=HIST_N)
-        
-        # Calibración
+
         PASOS_POR_MM = int(pasos_por_mm_var.get())
-        
-        # Alturas de filas
+
         for i in range(5):
             ALTURAS_MM[i] = int(altura_fila_vars[i].get())
-        
-        # Posiciones de estaciones
+
         Y_ESTACION_MM[1] = int(y_estacion_vars[1].get())
         Y_ESTACION_MM[2] = int(y_estacion_vars[2].get())
         Y_ESTACION_MM[3] = int(y_estacion_vars[3].get())
-        
+
         X_ESTACIONES_MM[1] = int(x_estacion_vars[1].get())
         X_ESTACIONES_MM[2] = int(x_estacion_vars[2].get())
         X_ESTACIONES_MM[3] = int(x_estacion_vars[3].get())
-        
+
         log(f"✅ Configuración aplicada: MIN_CAUSAS={MIN_CAUSAS}, HISTERESIS={HISTERESIS}, HIST_N={HIST_N}")
         log(f"   PASOS_POR_MM={PASOS_POR_MM}, ALTURAS={ALTURAS_MM}")
         messagebox.showinfo("Éxito", "Configuración aplicada correctamente")
-        
+
         actualizar_panel_dinamico()
-        
+
     except ValueError as e:
         messagebox.showerror("Error", f"Valores inválidos: {e}")
-        
+
 def restablecer_valores():
-    """Restablece los valores por defecto de configuración"""
     min_causas_var.set("2")
     histeresis_var.set("3")
     hist_n_var.set("20")
     pasos_por_mm_var.set("5")
-    
+
     for i in range(5):
         altura_fila_vars[i].set(str([160, 155, 157.5, 155, 155][i]))
-    
+
     y_estacion_vars[1].set("57")
     y_estacion_vars[2].set("54")
     y_estacion_vars[3].set("54")
-    
+
     x_estacion_vars[1].set("163")
     x_estacion_vars[2].set(str(165 + 465))
     x_estacion_vars[3].set(str(170 + 465 + 610))
-    
+
     log("🔄 Valores restablecidos a valores por defecto")
     messagebox.showinfo("Info", "Valores restablecidos")
 
-# ===================== funciones extra ===================
 def reset_ui_con_confirmacion():
-    if messagebox.askyesno("Confirmar", "¿Estás seguro de resetear todo el almacén?\nSe perderán todas las cajas y el historial."):
-        reset_ui()
+    if messagebox.askyesno("Confirmar Reset",
+                          "¿Estás seguro de resetear TODO el sistema?\n\n"
+                          "Se perderán:\n"
+                          "• Todas las cajas del almacén\n"
+                          "• El historial de frecuencia\n"
+                          "• Las estadísticas de todos los algoritmos\n"
+                          "• Los contadores de ciclos y tiempo\n"
+                          "• El heatmap de accesos\n"
+                          "• La lista de instrucciones"):
+        reset_grid()
 
 def ejecutar_o_continuar():
     global pausado
@@ -942,11 +1110,16 @@ def pausar_ui():
     btn_run.config(text="Continuar")
 
 def home_ui():
+    """Envía el comando HOME de forma bloqueante"""
     global pos_actual_x, pos_actual_y
+    btn_home.config(state="disabled", text="Home...")
+    
     enviar_comando(HOME)
     pos_actual_x = 0
     pos_actual_y = 0
-    log("🏠 Home manual")
+    log("🏠 Home completado")
+    
+    btn_home.config(state="normal", text="Home")
 
 def reset_ui():
     global pausado
@@ -956,8 +1129,7 @@ def reset_ui():
 # ================= ESTADÍSTICAS =================
 def actualizar_estadisticas():
     global fig_barras, ax_barras, canvas_barras, fig_pastel, ax_pastel, canvas_pastel
-    
-    # Actualizar datos de las gráficas
+
     algoritmos = ["Zonas", "Producto", "Frecuencia"]
     cargas = [
         stats_por_algoritmo["zonas"]["cargas"],
@@ -969,15 +1141,14 @@ def actualizar_estadisticas():
         stats_por_algoritmo["producto"]["descargas"],
         stats_por_algoritmo["frecuencia"]["descargas"]
     ]
-    
-    # Actualizar gráfica de barras
+
     ax_barras.clear()
     x = range(len(algoritmos))
     width = 0.35
-    
+
     ax_barras.bar([i - width/2 for i in x], cargas, width, label="Cargas", color="green")
     ax_barras.bar([i + width/2 for i in x], descargas, width, label="Descargas", color="red")
-    
+
     ax_barras.set_xlabel("Algoritmo")
     ax_barras.set_ylabel("Cantidad")
     ax_barras.set_title("Cargas y Descargas por Algoritmo")
@@ -987,75 +1158,68 @@ def actualizar_estadisticas():
     ax_barras.grid(True, alpha=0.3)
     fig_barras.tight_layout()
     canvas_barras.draw()
-    
-    # Actualizar gráfica de pastel
+
     ax_pastel.clear()
     labels_pastel = ["Vacias", "Rojas", "Verdes", "Azules", "Desc."]
     colores_pastel = ["gray", "red", "green", "blue", "yellow"]
     vacias = 50 - sum(presencia)
     valores_pastel = [vacias, color.count(1), color.count(2), color.count(3), color.count(4)]
-    
-    # Filtrar valores cero para mejor visualización
+
     labels_filtrados = []
     valores_filtrados = []
     colores_filtrados = []
-    
+
     for i, val in enumerate(valores_pastel):
         if val > 0:
             labels_filtrados.append(labels_pastel[i])
             valores_filtrados.append(val)
             colores_filtrados.append(colores_pastel[i])
-    
+
     if valores_filtrados:
-        wedges, texts, autotexts = ax_pastel.pie(valores_filtrados, labels=labels_filtrados, 
+        wedges, texts, autotexts = ax_pastel.pie(valores_filtrados, labels=labels_filtrados,
                                                  colors=colores_filtrados,
                                                  autopct="%1.1f%%", startangle=90)
         ax_pastel.set_title("Distribucion del Almacen")
-        
         for autotext in autotexts:
             autotext.set_color("white")
             autotext.set_fontweight("bold")
     else:
         ax_pastel.text(0.5, 0.5, "Sin datos", ha="center", va="center")
-    
+
     fig_pastel.tight_layout()
     canvas_pastel.draw()
-    
-    # Actualizar estadísticas numéricas
-    # Métricas globales
+
     lbl_stats_total_ciclos.config(text=f"{ciclos_totales}")
     lbl_stats_tiempo_acumulado.config(text=f"{tiempo_total:.1f} s")
-    
+
     if tiempo_total > 0:
         throughput_global = (ciclos_totales * 60) / tiempo_total
         lbl_stats_throughput_global.config(text=f"{throughput_global:.1f}/min")
     else:
         lbl_stats_throughput_global.config(text="0.0/min")
-    
-    # Ocupación
+
     ocup = sum(presencia)
     porcentaje = (ocup / 50) * 100
     lbl_stats_ocupacion_valor.config(text=f"{ocup}/50")
     lbl_stats_ocupacion_porc.config(text=f"{porcentaje:.0f}%")
-    
-    # Distribución por color
+
     lbl_stats_rojas.config(text=f"{color.count(1)}")
     lbl_stats_verdes.config(text=f"{color.count(2)}")
     lbl_stats_azules.config(text=f"{color.count(3)}")
     lbl_stats_desc.config(text=f"{color.count(4)}")
-    
-    # Estadísticas por algoritmo
+    lbl_stats_vacias.config(text=f"{vacias}")
+
     for alg in ["zonas", "producto", "frecuencia"]:
         stats = stats_por_algoritmo[alg]
         ciclos = stats["ciclos"]
         tiempo = stats["tiempo_total"]
-        cargas = stats["cargas"]
-        descargas = stats["descargas"]
-        
+        cargas_alg = stats["cargas"]
+        descargas_alg = stats["descargas"]
+
         if alg == "zonas":
             lbl_stats_zonas_ciclos.config(text=f"{ciclos}")
-            lbl_stats_zonas_cargas.config(text=f"{cargas}")
-            lbl_stats_zonas_descargas.config(text=f"{descargas}")
+            lbl_stats_zonas_cargas.config(text=f"{cargas_alg}")
+            lbl_stats_zonas_descargas.config(text=f"{descargas_alg}")
             if ciclos > 0:
                 prom = tiempo / ciclos
                 throughput = 60 / prom if prom > 0 else 0
@@ -1064,11 +1228,11 @@ def actualizar_estadisticas():
             else:
                 lbl_stats_zonas_tiempo.config(text="-- s")
                 lbl_stats_zonas_throughput.config(text="--/min")
-                
+
         elif alg == "producto":
             lbl_stats_producto_ciclos.config(text=f"{ciclos}")
-            lbl_stats_producto_cargas.config(text=f"{cargas}")
-            lbl_stats_producto_descargas.config(text=f"{descargas}")
+            lbl_stats_producto_cargas.config(text=f"{cargas_alg}")
+            lbl_stats_producto_descargas.config(text=f"{descargas_alg}")
             if ciclos > 0:
                 prom = tiempo / ciclos
                 throughput = 60 / prom if prom > 0 else 0
@@ -1077,11 +1241,11 @@ def actualizar_estadisticas():
             else:
                 lbl_stats_producto_tiempo.config(text="-- s")
                 lbl_stats_producto_throughput.config(text="--/min")
-                
+
         elif alg == "frecuencia":
             lbl_stats_frecuencia_ciclos.config(text=f"{ciclos}")
-            lbl_stats_frecuencia_cargas.config(text=f"{cargas}")
-            lbl_stats_frecuencia_descargas.config(text=f"{descargas}")
+            lbl_stats_frecuencia_cargas.config(text=f"{cargas_alg}")
+            lbl_stats_frecuencia_descargas.config(text=f"{descargas_alg}")
             if ciclos > 0:
                 prom = tiempo / ciclos
                 throughput = 60 / prom if prom > 0 else 0
@@ -1090,11 +1254,14 @@ def actualizar_estadisticas():
             else:
                 lbl_stats_frecuencia_tiempo.config(text="-- s")
                 lbl_stats_frecuencia_throughput.config(text="--/min")
-    
-    # Parámetros
+
     lbl_stats_min_causas.config(text=f"{MIN_CAUSAS}")
     lbl_stats_histeresis.config(text=f"{HISTERESIS}")
     lbl_stats_hist_n.config(text=f"{HIST_N}")
+    
+    lbl_frecuencia_min.config(text=f"{MIN_CAUSAS}")
+    lbl_frecuencia_histeresis.config(text=f"{HISTERESIS}")
+    lbl_frecuencia_hist_n.config(text=f"{HIST_N}")
 
 # ================= HEATMAP =================
 celdas_heatmap = []
@@ -1102,64 +1269,47 @@ celdas_heatmap = []
 def actualizar_heatmap():
     if not celdas_heatmap:
         return
-    
+
     max_accesos = max(heatmap_data) if max(heatmap_data) > 0 else 1
-    
+
     for i, accesos in enumerate(heatmap_data):
-        # Normalizar el valor entre 0 y 1
         intensidad = accesos / max_accesos if max_accesos > 0 else 0
-        
-        # ESCALA CORRECTA PARA HEATMAP:
-        # Celeste (0) -> Verde -> Amarillo -> Naranja -> Rojo (1)
-        
+
         if intensidad < 0.2:
-            # Celeste a Verde claro
-            # RGB: (0, 255, 255) -> (0, 255, 0)
             r = 0
             g = 255
             b = 255 - int((intensidad / 0.2) * 255)
         elif intensidad < 0.4:
-            # Verde claro a Amarillo
-            # RGB: (0, 255, 0) -> (255, 255, 0)
             r = int(((intensidad - 0.2) / 0.2) * 255)
             g = 255
             b = 0
         elif intensidad < 0.6:
-            # Amarillo a Naranja
-            # RGB: (255, 255, 0) -> (255, 165, 0)
             r = 255
-            g = 255 - int(((intensidad - 0.4) / 0.2) * 90)  # 255 -> 165
+            g = 255 - int(((intensidad - 0.4) / 0.2) * 90)
             b = 0
         elif intensidad < 0.8:
-            # Naranja a Rojo claro
-            # RGB: (255, 165, 0) -> (255, 69, 0)
             r = 255
-            g = 165 - int(((intensidad - 0.6) / 0.2) * 96)  # 165 -> 69
+            g = 165 - int(((intensidad - 0.6) / 0.2) * 96)
             b = 0
         else:
-            # Rojo claro a Rojo intenso
-            # RGB: (255, 69, 0) -> (255, 0, 0)
             r = 255
-            g = 69 - int(((intensidad - 0.8) / 0.2) * 69)  # 69 -> 0
+            g = 69 - int(((intensidad - 0.8) / 0.2) * 69)
             b = 0
-        
-        # Asegurar valores dentro de rango 0-255
+
         r = max(0, min(255, int(r)))
         g = max(0, min(255, int(g)))
         b = max(0, min(255, int(b)))
-        
+
         color_heat = f"#{r:02x}{g:02x}{b:02x}"
-        
-        # Texto en negro para colores claros, blanco para oscuros
-        if intensidad < 0.3:  # Celeste/Verde claro - texto negro
+
+        if intensidad < 0.3:
             fg = "black"
-        else:  # Colores más oscuros - texto blanco
+        else:
             fg = "white"
-        
+
         celdas_heatmap[i].config(bg=color_heat, fg=fg)
         celdas_heatmap[i].config(text=f"{i+1}\n({accesos})")
-    
-    # Actualizar leyenda
+
     try:
         lbl_heatmap_leyenda.config(text=f"Celeste (0) → Verde → Amarillo → Naranja → Rojo ({max_accesos} máx)")
         lbl_heatmap_max.config(text=f"Máximo accesos: {max_accesos}")
@@ -1168,29 +1318,29 @@ def actualizar_heatmap():
 
 def crear_grid_heatmap(parent):
     temp_celdas = [None] * TOTAL_CELDAS
-    
+
     for r in range(FILAS):
         for c in range(COLUMNAS):
             fila_real = FILAS - 1 - r
             num_celda = fila_real * COLUMNAS + c + 1
-            
+
             lbl = tk.Label(
                 parent,
                 text=f"{num_celda}\n(0)",
                 width=8,
                 height=4,
-                bg="#a0f0ff",  # Celeste claro inicial
+                bg="#a0f0ff",
                 fg="black",
                 relief="ridge",
                 font=("Arial", 9, "bold")
             )
             lbl.grid(row=r, column=c, padx=1, pady=1)
             temp_celdas[num_celda - 1] = lbl
-    
+
     celdas_heatmap.clear()
     celdas_heatmap.extend(temp_celdas)
-    
-    
+
+
 # ====================================================
 # ===================== UI ===========================
 # ====================================================
@@ -1288,8 +1438,7 @@ frame_segunda_fila.pack(fill="x", pady=5, padx=10)
 frame_segunda_fila.columnconfigure(0, weight=2)
 frame_segunda_fila.columnconfigure(1, weight=1)
 
-# Panel dinámico (información del algoritmo)
-frame_panel_dinamico = tk.LabelFrame(frame_segunda_fila, text="📊 Información del Algoritmo", 
+frame_panel_dinamico = tk.LabelFrame(frame_segunda_fila, text="📊 Información del Algoritmo",
                                       font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_panel_dinamico.grid(row=0, column=0, sticky="nsew", padx=(0,5))
 frame_panel_dinamico.grid_propagate(False)
@@ -1301,12 +1450,11 @@ inner_algoritmo.pack(expand=True, fill="both", padx=5, pady=5)
 def actualizar_panel_dinamico():
     for widget in inner_algoritmo.winfo_children():
         widget.destroy()
-    
+
     algoritmo = algoritmo_var.get()
-    
     inner_algoritmo.grid_rowconfigure(0, weight=1)
     inner_algoritmo.grid_rowconfigure(1, weight=1)
-    
+
     if algoritmo == "zonas":
         tk.Label(inner_algoritmo, text="Zona activa:", font=("Arial", 9, "bold")).grid(row=0, column=0, sticky="w", padx=2, pady=2)
         for i in range(1, 6):
@@ -1316,7 +1464,7 @@ def actualizar_panel_dinamico():
                                 font=("Arial", 8, "bold"),
                                 command=cambiar_zona)
             rb.grid(row=0, column=i, padx=1, pady=2)
-        
+
         ocupacion_zona = [0]*5
         total_zona = [0]*5
         for i in range(50):
@@ -1326,63 +1474,63 @@ def actualizar_panel_dinamico():
             if estado_logico[i] != 0:
                 ocupacion_zona[zona] += 1
             total_zona[zona] += 1
-        
+
         texto_ocupacion = "Ocupación:                      "
         for z in range(5):
             porcentaje = (ocupacion_zona[z] / total_zona[z]) * 100 if total_zona[z] else 0
             texto_ocupacion += f"Zona {z+1}: {ocupacion_zona[z]}/{total_zona[z]} ({porcentaje:.0f}%)    "
-        
-        tk.Label(inner_algoritmo, text=texto_ocupacion.strip(), 
+
+        tk.Label(inner_algoritmo, text=texto_ocupacion.strip(),
                 font=("Arial", 9)).grid(row=1, column=0, columnspan=6, sticky="w", padx=2, pady=2)
-    
+
     elif algoritmo == "producto":
-        total_rojo = sum(1 for i in range(TOTAL_CELDAS) 
+        total_rojo = sum(1 for i in range(TOTAL_CELDAS)
                         if 0 <= (i % ESPACIOS_X) <= 2 and estado_logico[i] != 0)
         total_rojo_max = 15
         pct_rojo = int((total_rojo / total_rojo_max) * 100)
-        
-        total_verde = sum(1 for i in range(TOTAL_CELDAS) 
+
+        total_verde = sum(1 for i in range(TOTAL_CELDAS)
                          if 3 <= (i % ESPACIOS_X) <= 5 and estado_logico[i] != 0)
         total_verde_max = 15
         pct_verde = int((total_verde / total_verde_max) * 100)
-        
-        total_azul = sum(1 for i in range(TOTAL_CELDAS) 
+
+        total_azul = sum(1 for i in range(TOTAL_CELDAS)
                         if 7 <= (i % ESPACIOS_X) <= 9 and estado_logico[i] != 0)
         total_azul_max = 15
         pct_azul = int((total_azul / total_azul_max) * 100)
-        
-        total_desc = sum(1 for i in range(TOTAL_CELDAS) 
+
+        total_desc = sum(1 for i in range(TOTAL_CELDAS)
                         if (i % ESPACIOS_X) == 6 and estado_logico[i] != 0)
         total_desc_max = 5
         pct_desc = int((total_desc / total_desc_max) * 100)
-        
+
         tk.Label(inner_algoritmo, text="Cajas tipo de producto:   ", font=("Arial", 11, "bold")).grid(row=0, column=0, sticky="e", padx=2)
         tk.Label(inner_algoritmo, text="   ", font=("Arial", 12, "bold")).grid(row=0, column=1, sticky="e", padx=2)
-        
+
         tk.Label(inner_algoritmo, text="●", fg="red", font=("Arial", 12)).grid(row=0, column=2, sticky="nsew", padx=2)
-        tk.Label(inner_algoritmo, text=f"Rojo: {total_rojo}/{total_rojo_max} ({pct_rojo}%)", 
+        tk.Label(inner_algoritmo, text=f"Rojo: {total_rojo}/{total_rojo_max} ({pct_rojo}%)",
                 font=("Arial", 8)).grid(row=0, column=3, sticky="w", padx=2)
-        
+
         tk.Label(inner_algoritmo, text="              ", font=("Arial", 12, "bold")).grid(row=0, column=4, sticky="e", padx=2)
-        
+
         tk.Label(inner_algoritmo, text="●", fg="green", font=("Arial", 12)).grid(row=0, column=5, sticky="nsew", padx=2)
-        tk.Label(inner_algoritmo, text=f"Verde: {total_verde}/{total_verde_max} ({pct_verde}%)", 
+        tk.Label(inner_algoritmo, text=f"Verde: {total_verde}/{total_verde_max} ({pct_verde}%)",
                 font=("Arial", 8)).grid(row=0, column=6, sticky="w", padx=2)
-        
+
         tk.Label(inner_algoritmo, text="●", fg="blue",  font=("Arial", 12)).grid(row=1, column=2, sticky="nsew", padx=2)
-        tk.Label(inner_algoritmo, text=f"Azul: {total_azul}/{total_azul_max} ({pct_azul}%)", 
+        tk.Label(inner_algoritmo, text=f"Azul: {total_azul}/{total_azul_max} ({pct_azul}%)",
                 font=("Arial", 8)).grid(row=1, column=3, sticky="w", padx=2)
-        
+
         tk.Label(inner_algoritmo, text="●", fg="yellow", font=("Arial", 12)).grid(row=1, column=5, sticky="nsew", padx=2)
-        tk.Label(inner_algoritmo, text=f"Desconocido: {total_desc}/{total_desc_max} ({pct_desc}%)", 
+        tk.Label(inner_algoritmo, text=f"Desconocido: {total_desc}/{total_desc_max} ({pct_desc}%)",
                 font=("Arial", 8)).grid(row=1, column=6, sticky="w", padx=2)
-    
+
     elif algoritmo == "frecuencia":
         color_icons = {1: ("●", "red"), 2: ("●", "green"), 3: ("●", "blue")}
         color_names = {1: "Rojo", 2: "Verde", 3: "Azul"}
-        
+
         tk.Label(inner_algoritmo, text="Color más requerido:     ", font=("Arial", 9, "bold")).grid(row=0, column=0, columnspan=6, sticky="w", padx=2, pady=2)
-        
+
         col_start = 8
         for est in [1, 2, 3]:
             hist = list(historial[est])
@@ -1393,28 +1541,28 @@ def actualizar_panel_dinamico():
             sorted_colors = sorted(conteo.items(), key=lambda x: x[1], reverse=True)
             if sorted_colors and sorted_colors[0][1] > 0:
                 top1 = sorted_colors[0][0]
-                icono, color = color_icons.get(top1, ("●", "black"))
+                icono, color_icon = color_icons.get(top1, ("●", "black"))
                 nombre = color_names.get(top1, "?")
             else:
-                icono, color = ("●", "black")
+                icono, color_icon = ("●", "black")
                 nombre = "?"
-            
+
             tk.Label(inner_algoritmo, text=f"Estación {est}:", font=("Arial", 8, "bold")).grid(row=0, column=col_start+1, sticky="e", padx=2)
             tk.Label(inner_algoritmo, text="        ", font=("Arial", 12, "bold")).grid(row=0, column=col_start, sticky="e", padx=2)
-            
+
             frame_icono = tk.Frame(inner_algoritmo)
             frame_icono.grid(row=0, column=col_start+2, sticky="w", padx=2)
-            tk.Label(frame_icono, text=icono, fg=color, font=("Arial", 10)).pack(side="left")
+            tk.Label(frame_icono, text=icono, fg=color_icon, font=("Arial", 10)).pack(side="left")
             tk.Label(frame_icono, text=f" {nombre}", font=("Arial", 8)).pack(side="left")
-            
+
             col_start += 3
-        
+
         inner_algoritmo.grid_rowconfigure(2, weight=1)
-        tk.Label(inner_algoritmo, text=f"Stock mínimo:                    {MIN_CAUSAS} cajas", 
+        tk.Label(inner_algoritmo, text=f"Stock mínimo:                    {MIN_CAUSAS} cajas",
                 font=("Arial", 8, "bold")).grid(row=2, column=0, columnspan=6, sticky="w", padx=2, pady=2)
 
 # Panel resumen del sistema
-frame_resumen = tk.LabelFrame(frame_segunda_fila, text="📈 Resumen del Sistema", 
+frame_resumen = tk.LabelFrame(frame_segunda_fila, text="📈 Resumen del Sistema",
                                 font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_resumen.grid(row=0, column=1, sticky="nsew", padx=(5,0))
 frame_resumen.grid_propagate(False)
@@ -1456,7 +1604,6 @@ frame_grid_container.pack(side="left", padx=2, fill="both", expand=True)
 frame_grid_centrado = tk.Frame(frame_grid_container)
 frame_grid_centrado.pack(expand=True)
 
-# Grid de celdas
 frame_grid = tk.Frame(frame_grid_centrado, bg="lightgray")
 frame_grid.pack(pady=5)
 
@@ -1579,47 +1726,38 @@ text_log.config(yscrollcommand=scroll_log.set)
 scroll_log.config(command=text_log.yview)
 
 # ================= TAB CONFIGURACIÓN =================
-# Configurar grid para que ocupe todo el espacio
-tab_config.grid_rowconfigure(0, weight=0)  # Parámetros - altura fija
-tab_config.grid_rowconfigure(1, weight=1)  # Generador - expandible
+tab_config.grid_rowconfigure(0, weight=0)
+tab_config.grid_rowconfigure(1, weight=1)
 tab_config.grid_columnconfigure(0, weight=1)
 tab_config.grid_columnconfigure(1, weight=1)
 
-# ===== SECCIÓN 1: PARÁMETROS DEL SISTEMA (OCUPA ANCHO COMPLETO) =====
 frame_parametros = tk.LabelFrame(tab_config, text="⚙️ Parámetros del Sistema", font=("Arial", 12, "bold"), padx=15, pady=15)
 frame_parametros.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=10)
 
-# Variables
 min_causas_var = tk.StringVar(value=str(MIN_CAUSAS))
 histeresis_var = tk.StringVar(value=str(HISTERESIS))
 hist_n_var = tk.StringVar(value=str(HIST_N))
 pasos_por_mm_var = tk.StringVar(value=str(PASOS_POR_MM))
 
-# Alturas de filas (5 filas)
 altura_fila_vars = []
 for i in range(5):
     var = tk.StringVar(value=str(ALTURAS_MM[i]))
     altura_fila_vars.append(var)
 
-# Posiciones Y de estaciones
 y_estacion_vars = {}
 for est in [1, 2, 3]:
     y_estacion_vars[est] = tk.StringVar(value=str(Y_ESTACION_MM[est]))
 
-# Posiciones X de estaciones
 x_estacion_vars = {}
 for est in [1, 2, 3]:
     x_estacion_vars[est] = tk.StringVar(value=str(X_ESTACIONES_MM[est]))
 
-# Crear un frame interior con grid para mejor organización
 inner_params = tk.Frame(frame_parametros)
 inner_params.pack(fill="both", expand=True, padx=5, pady=5)
 
-# Configurar columnas para distribución
 inner_params.columnconfigure(0, weight=1)
 inner_params.columnconfigure(1, weight=1)
 
-# ---- COLUMNA IZQUIERDA: PARÁMETROS DE ALGORITMOS ----
 frame_algoritmos = tk.LabelFrame(inner_params, text="📊 PARÁMETROS DE ALGORITMOS", font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_algoritmos.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -1638,7 +1776,6 @@ entry_hist = tk.Entry(frame_algoritmos, textvariable=hist_n_var, width=10)
 entry_hist.grid(row=2, column=1, sticky="w", padx=5)
 tk.Label(frame_algoritmos, text="(Número de descargas a recordar)", font=("Arial", 8), fg="gray").grid(row=2, column=2, sticky="w", padx=5)
 
-# ---- COLUMNA DERECHA: CALIBRACIÓN DEL SISTEMA ----
 frame_calibracion = tk.LabelFrame(inner_params, text="📏 CALIBRACIÓN DEL SISTEMA", font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_calibracion.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
 
@@ -1647,17 +1784,14 @@ entry_pasos = tk.Entry(frame_calibracion, textvariable=pasos_por_mm_var, width=1
 entry_pasos.grid(row=0, column=1, sticky="w", padx=5)
 tk.Label(frame_calibracion, text="(Resolución del motor)", font=("Arial", 8), fg="gray").grid(row=0, column=2, sticky="w", padx=5)
 
-# Alturas de filas
 tk.Label(frame_calibracion, text="ALTURAS DE FILAS (mm):", font=("Arial", 9, "bold")).grid(row=1, column=0, columnspan=3, sticky="w", pady=(10,5))
 
 for i in range(5):
     tk.Label(frame_calibracion, text=f"Fila {i+1}:", font=("Arial", 9)).grid(row=2+i, column=0, sticky="w", pady=2)
     tk.Entry(frame_calibracion, textvariable=altura_fila_vars[i], width=10).grid(row=2+i, column=1, sticky="w", padx=5)
 
-# Posiciones de estaciones
 tk.Label(frame_calibracion, text="POSICIONES DE ESTACIONES (mm):", font=("Arial", 9, "bold")).grid(row=7, column=0, columnspan=3, sticky="w", pady=(10,5))
 
-# Estación 1
 tk.Label(frame_calibracion, text="Estación 1:", font=("Arial", 9)).grid(row=8, column=0, sticky="w", pady=2)
 frame_est1 = tk.Frame(frame_calibracion)
 frame_est1.grid(row=8, column=1, columnspan=2, sticky="w")
@@ -1666,7 +1800,6 @@ tk.Entry(frame_est1, textvariable=x_estacion_vars[1], width=8).pack(side="left",
 tk.Label(frame_est1, text="Y:", font=("Arial", 8)).pack(side="left", padx=(10,2))
 tk.Entry(frame_est1, textvariable=y_estacion_vars[1], width=8).pack(side="left", padx=2)
 
-# Estación 2
 tk.Label(frame_calibracion, text="Estación 2:", font=("Arial", 9)).grid(row=9, column=0, sticky="w", pady=2)
 frame_est2 = tk.Frame(frame_calibracion)
 frame_est2.grid(row=9, column=1, columnspan=2, sticky="w")
@@ -1675,7 +1808,6 @@ tk.Entry(frame_est2, textvariable=x_estacion_vars[2], width=8).pack(side="left",
 tk.Label(frame_est2, text="Y:", font=("Arial", 8)).pack(side="left", padx=(10,2))
 tk.Entry(frame_est2, textvariable=y_estacion_vars[2], width=8).pack(side="left", padx=2)
 
-# Estación 3
 tk.Label(frame_calibracion, text="Estación 3:", font=("Arial", 9)).grid(row=10, column=0, sticky="w", pady=2)
 frame_est3 = tk.Frame(frame_calibracion)
 frame_est3.grid(row=10, column=1, columnspan=2, sticky="w")
@@ -1684,23 +1816,20 @@ tk.Entry(frame_est3, textvariable=x_estacion_vars[3], width=8).pack(side="left",
 tk.Label(frame_est3, text="Y:", font=("Arial", 8)).pack(side="left", padx=(10,2))
 tk.Entry(frame_est3, textvariable=y_estacion_vars[3], width=8).pack(side="left", padx=2)
 
-# Botón Aplicar Configuración
 frame_boton = tk.Frame(frame_parametros)
 frame_boton.pack(fill="x", pady=10)
 tk.Button(frame_boton, text="✅ APLICAR CONFIGURACIÓN", command=aplicar_configuracion,
           bg="#4CAF50", fg="white", font=("Arial", 11, "bold"), width=25).pack()
 
-# ===== SECCIÓN 2: GENERADOR DE INSTRUCCIONES (OCUPA RESTO DEL ESPACIO) =====
+# ===== SECCIÓN 2: GENERADOR DE INSTRUCCIONES =====
 frame_gen = tk.LabelFrame(tab_config, text="📋 Generador de Instrucciones", font=("Arial", 12, "bold"), padx=15, pady=15)
 frame_gen.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
 
-# Configurar grid interno para las 3 columnas
 frame_gen.grid_columnconfigure(0, weight=1)
 frame_gen.grid_columnconfigure(1, weight=1)
-frame_gen.grid_columnconfigure(2, weight=2)  # Visor más ancho
+frame_gen.grid_columnconfigure(2, weight=2)
 frame_gen.grid_rowconfigure(0, weight=1)
 
-# ---- COLUMNA 1: Instrucción manual ----
 frame_manual = tk.LabelFrame(frame_gen, text="✍️ Instrucción manual", font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_manual.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 frame_manual.grid_columnconfigure(1, weight=1)
@@ -1720,7 +1849,6 @@ ttk.Combobox(frame_manual, textvariable=color_manual_var, values=["Rojo", "Verde
 tk.Button(frame_manual, text="➕ Agregar", command=agregar_instruccion, bg="#4CAF50", fg="white", font=("Arial", 9, "bold")).grid(row=3, column=0, columnspan=2, sticky="ew", pady=5)
 tk.Button(frame_manual, text="🗑️ Eliminar última", command=eliminar_ultima, bg="#f44336", fg="white", font=("Arial", 9, "bold")).grid(row=4, column=0, columnspan=2, sticky="ew", pady=5)
 
-# ---- COLUMNA 2: Instrucciones aleatorias ----
 frame_rand = tk.LabelFrame(frame_gen, text="🎲 Instrucciones aleatorias", font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_rand.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
 frame_rand.grid_columnconfigure(1, weight=1)
@@ -1729,10 +1857,9 @@ tk.Label(frame_rand, text="Cantidad:", font=("Arial", 9, "bold")).grid(row=0, co
 entry_cantidad = tk.Entry(frame_rand, width=12)
 entry_cantidad.grid(row=0, column=1, sticky="ew", padx=5)
 
-tk.Button(frame_rand, text="🎲 Generar lista", command=generar_lista_random, 
+tk.Button(frame_rand, text="🎲 Generar lista", command=generar_lista_random,
           bg="#FF9800", fg="white", font=("Arial", 10, "bold")).grid(row=1, column=0, columnspan=2, sticky="ew", pady=10)
 
-# ---- COLUMNA 3: Lista de instrucciones ----
 frame_lista = tk.LabelFrame(frame_gen, text="📋 Lista de instrucciones", font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_lista.grid(row=0, column=2, sticky="nsew", padx=5, pady=5)
 frame_lista.grid_rowconfigure(0, weight=1)
@@ -1741,22 +1868,18 @@ frame_lista.grid_columnconfigure(0, weight=1)
 text_lista_config = tk.Text(frame_lista, font=("Consolas", 10), wrap=tk.WORD)
 text_lista_config.grid(row=0, column=0, sticky="nsew")
 
-# Scrollbar para el visor
 scroll_lista = tk.Scrollbar(text_lista_config)
 scroll_lista.pack(side="right", fill="y")
 text_lista_config.config(yscrollcommand=scroll_lista.set)
 scroll_lista.config(command=text_lista_config.yview)
 
 # ================= TAB ESTADÍSTICAS =================
-# Configurar grid principal
-tab_stats.grid_rowconfigure(0, weight=2)  # Gráficas (más espacio)
-tab_stats.grid_rowconfigure(1, weight=3)  # Estadísticas numéricas
+tab_stats.grid_rowconfigure(0, weight=2)
+tab_stats.grid_rowconfigure(1, weight=3)
 tab_stats.grid_columnconfigure(0, weight=1)
 tab_stats.grid_columnconfigure(1, weight=1)
 
-# ===== FILA 0: GRÁFICAS =====
-# ---- GRÁFICA 1: Cargas/Descargas por Algoritmo ----
-frame_grafica_barras = tk.LabelFrame(tab_stats, text="Cargas/Descargas por Algoritmo", 
+frame_grafica_barras = tk.LabelFrame(tab_stats, text="Cargas/Descargas por Algoritmo",
                                       font=("Arial", 11, "bold"), padx=5, pady=5)
 frame_grafica_barras.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -1764,14 +1887,14 @@ fig_barras = Figure(figsize=(5, 3.5), dpi=100)
 ax_barras = fig_barras.add_subplot(111)
 
 algoritmos = ["Zonas", "Producto", "Frecuencia"]
-cargas = [0, 0, 0]
-descargas = [0, 0, 0]
+cargas_ini = [0, 0, 0]
+descargas_ini = [0, 0, 0]
 
 x = range(len(algoritmos))
 width = 0.35
 
-ax_barras.bar([i - width/2 for i in x], cargas, width, label="Cargas", color="green")
-ax_barras.bar([i + width/2 for i in x], descargas, width, label="Descargas", color="red")
+ax_barras.bar([i - width/2 for i in x], cargas_ini, width, label="Cargas", color="green")
+ax_barras.bar([i + width/2 for i in x], descargas_ini, width, label="Descargas", color="red")
 
 ax_barras.set_xlabel("Algoritmo")
 ax_barras.set_ylabel("Cantidad")
@@ -1780,15 +1903,13 @@ ax_barras.set_xticks(x)
 ax_barras.set_xticklabels(algoritmos)
 ax_barras.legend()
 ax_barras.grid(True, alpha=0.3)
-
 fig_barras.tight_layout()
 
 canvas_barras = FigureCanvasTkAgg(fig_barras, master=frame_grafica_barras)
 canvas_barras.draw()
 canvas_barras.get_tk_widget().pack(fill="both", expand=True)
 
-# ---- GRÁFICA 2: Ocupación del Almacén ----
-frame_grafica_pastel = tk.LabelFrame(tab_stats, text="Ocupación del Almacén", 
+frame_grafica_pastel = tk.LabelFrame(tab_stats, text="Ocupación del Almacén",
                                       font=("Arial", 11, "bold"), padx=5, pady=5)
 frame_grafica_pastel.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
 
@@ -1797,9 +1918,9 @@ ax_pastel = fig_pastel.add_subplot(111)
 
 labels_pastel = ["Vacías", "Rojas", "Verdes", "Azules", "Desc."]
 colores_pastel = ["gray", "red", "green", "blue", "yellow"]
-valores_pastel = [50, 0, 0, 0, 0]
+valores_pastel_ini = [50, 0, 0, 0, 0]
 
-wedges, texts, autotexts = ax_pastel.pie(valores_pastel, labels=labels_pastel, colors=colores_pastel,
+wedges, texts, autotexts = ax_pastel.pie(valores_pastel_ini, labels=labels_pastel, colors=colores_pastel,
                                           autopct="%1.1f%%", startangle=90)
 ax_pastel.set_title("Distribución del Almacén")
 
@@ -1813,7 +1934,7 @@ canvas_pastel = FigureCanvasTkAgg(fig_pastel, master=frame_grafica_pastel)
 canvas_pastel.draw()
 canvas_pastel.get_tk_widget().pack(fill="both", expand=True)
 
-# ===== FILA 1: ESTADÍSTICAS NUMÉRICAS (NOTEBOOK CON PESTAÑAS) =====
+# ===== ESTADÍSTICAS NUMÉRICAS =====
 notebook_stats = ttk.Notebook(tab_stats)
 notebook_stats.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
 
@@ -1821,14 +1942,11 @@ notebook_stats.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=5, pady=5
 tab_resumen = tk.Frame(notebook_stats)
 notebook_stats.add(tab_resumen, text="Resumen General")
 
-# Configurar grid 2x3 para resumen
 for i in range(3):
     tab_resumen.columnconfigure(i, weight=1)
 for i in range(2):
     tab_resumen.rowconfigure(i, weight=1)
 
-# ---- Fila 0 ----
-# Métricas globales
 frame_metricas = tk.LabelFrame(tab_resumen, text="Métricas Globales", font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_metricas.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -1844,7 +1962,6 @@ tk.Label(frame_metricas, text="Throughput global:", font=("Arial", 9, "bold")).g
 lbl_stats_throughput_global = tk.Label(frame_metricas, text="0.0/min", font=("Arial", 9))
 lbl_stats_throughput_global.grid(row=2, column=1, sticky="w", padx=5)
 
-# Ocupación
 frame_ocupacion = tk.LabelFrame(tab_resumen, text="Ocupación", font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_ocupacion.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
 
@@ -1856,7 +1973,6 @@ tk.Label(frame_ocupacion, text="Porcentaje:", font=("Arial", 9, "bold")).grid(ro
 lbl_stats_ocupacion_porc = tk.Label(frame_ocupacion, text="0%", font=("Arial", 9))
 lbl_stats_ocupacion_porc.grid(row=1, column=1, sticky="w", padx=5)
 
-# Parámetros rápidos
 frame_params_rapidos = tk.LabelFrame(tab_resumen, text="Parámetros", font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_params_rapidos.grid(row=0, column=2, sticky="nsew", padx=5, pady=5)
 
@@ -1872,7 +1988,6 @@ tk.Label(frame_params_rapidos, text="HIST_N:", font=("Arial", 9, "bold")).grid(r
 lbl_stats_hist_n = tk.Label(frame_params_rapidos, text=f"{HIST_N}", font=("Arial", 9))
 lbl_stats_hist_n.grid(row=2, column=1, sticky="w", padx=5)
 
-# ---- Fila 1: Distribución por color (ocupa las 3 columnas) ----
 frame_colores = tk.LabelFrame(tab_resumen, text="Distribución por Color", font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_colores.grid(row=1, column=0, columnspan=3, sticky="nsew", padx=5, pady=5)
 
@@ -1903,13 +2018,11 @@ lbl_stats_vacias.grid(row=1, column=3, padx=10)
 tab_algoritmos = tk.Frame(notebook_stats)
 notebook_stats.add(tab_algoritmos, text="Por Algoritmo")
 
-# Configurar grid 3x2
 for i in range(3):
     tab_algoritmos.rowconfigure(i, weight=1)
 for i in range(2):
     tab_algoritmos.columnconfigure(i, weight=1)
 
-# ---- Algoritmo Zonas ----
 frame_stats_zonas = tk.LabelFrame(tab_algoritmos, text="Algoritmo por Zonas", font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_stats_zonas.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -1933,7 +2046,6 @@ tk.Label(frame_stats_zonas, text="Throughput:", font=("Arial", 9, "bold")).grid(
 lbl_stats_zonas_throughput = tk.Label(frame_stats_zonas, text="--/min", font=("Arial", 9))
 lbl_stats_zonas_throughput.grid(row=4, column=1, sticky="w", padx=5)
 
-# ---- Algoritmo Producto ----
 frame_stats_producto = tk.LabelFrame(tab_algoritmos, text="Algoritmo por Producto", font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_stats_producto.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
 
@@ -1957,7 +2069,6 @@ tk.Label(frame_stats_producto, text="Throughput:", font=("Arial", 9, "bold")).gr
 lbl_stats_producto_throughput = tk.Label(frame_stats_producto, text="--/min", font=("Arial", 9))
 lbl_stats_producto_throughput.grid(row=4, column=1, sticky="w", padx=5)
 
-# ---- Algoritmo Frecuencia ----
 frame_stats_frecuencia = tk.LabelFrame(tab_algoritmos, text="Algoritmo por Frecuencia", font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_stats_frecuencia.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 
@@ -1981,7 +2092,6 @@ tk.Label(frame_stats_frecuencia, text="Throughput:", font=("Arial", 9, "bold")).
 lbl_stats_frecuencia_throughput = tk.Label(frame_stats_frecuencia, text="--/min", font=("Arial", 9))
 lbl_stats_frecuencia_throughput.grid(row=4, column=1, sticky="w", padx=5)
 
-# ---- Parámetros específicos de frecuencia ----
 frame_frecuencia_params = tk.LabelFrame(tab_algoritmos, text="Parámetros Frecuencia", font=("Arial", 10, "bold"), padx=10, pady=10)
 frame_frecuencia_params.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
 
@@ -1997,7 +2107,6 @@ tk.Label(frame_frecuencia_params, text="HIST_N:", font=("Arial", 9, "bold")).gri
 lbl_frecuencia_hist_n = tk.Label(frame_frecuencia_params, text=f"{HIST_N}", font=("Arial", 9))
 lbl_frecuencia_hist_n.grid(row=2, column=1, sticky="w", padx=5)
 
-# ---- Última fila vacía para equilibrar ----
 tk.Frame(tab_algoritmos).grid(row=2, column=0, columnspan=2, sticky="nsew")
 
 # ================= TAB HEATMAP =================
@@ -2013,14 +2122,13 @@ frame_heatmap_leyenda = tk.Frame(frame_heatmap_container)
 frame_heatmap_leyenda.pack(side="bottom", fill="x", pady=10)
 
 tk.Label(frame_heatmap_leyenda, text="Código de colores:", font=("Arial", 10, "bold")).pack(anchor="w", padx=10)
-lbl_heatmap_leyenda = tk.Label(frame_heatmap_leyenda, 
-                               text="Celeste (0) → Verde → Amarillo → Naranja → Rojo (máx)", 
+lbl_heatmap_leyenda = tk.Label(frame_heatmap_leyenda,
+                               text="Celeste (0) → Verde → Amarillo → Naranja → Rojo (máx)",
                                font=("Arial", 9))
 lbl_heatmap_leyenda.pack(anchor="w", padx=10)
 
-# Etiqueta con el valor máximo actual
-lbl_heatmap_max = tk.Label(frame_heatmap_leyenda, 
-                           text=f"Máximo accesos: 0", 
+lbl_heatmap_max = tk.Label(frame_heatmap_leyenda,
+                           text=f"Máximo accesos: 0",
                            font=("Arial", 9))
 lbl_heatmap_max.pack(anchor="w", padx=10, pady=(5,0))
 

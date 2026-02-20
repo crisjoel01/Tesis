@@ -58,6 +58,7 @@ const byte TCA_CANAL[3] = {
 
 void setup() {
   Wire.begin();
+  Wire.setClock(100000); 
   Serial.begin(115200);
 
   pinMode(Step, OUTPUT); pinMode(Dir, OUTPUT); 
@@ -88,7 +89,7 @@ void loop() {
       pasos = datos.substring(i1 + 6).toInt();
 
       switch (op) {
-        case 0: home(); comando = 0;  enviari2c();  esperarACK(); break;  //seteo home
+        case 0: home();  break;  //seteo home
         case 1: mov_garra(1); break;  //subir
         case 2: mov_garra(2); break;  //bajar
         case 3: mov_garra(3); break;  //izquierda
@@ -315,14 +316,15 @@ byte clasificarE1(float rN, float gN, float bN)
 
 byte clasificarE2(float rN, float gN, float bN)
 {
-  if(rN > gN + 0.11 && rN > bN + 0.11)
+  if(rN > gN + 0.09 && rN > bN + 0.09)
     return 1;
 
-  if(gN > rN + 0.04 && gN > bN + 0.10 && bN < 0.35)
+  if(gN > rN + 0.02 && gN > bN + 0.10 && bN < 0.34)
     return 2;
 
   return 3;
 }
+
 
 byte clasificarE3(float rN, float gN, float bN)
 {
@@ -392,13 +394,13 @@ void home(){
   delay(500);
   pasos = 600;
   mov_garra(1);
-  delay(1000);
+  delay(500);
   pasos = 20000;
   mov_garra(3);
-  delay(1000);
+  delay(500);
   pasos = 20000;
   mov_garra(2);
-  delay(1000);
+  delay(500);
 }
 
 // Movimiento cartesiano 

@@ -1,8 +1,8 @@
 
 // Pines para los finales de carrera (configuración Pull-Down)
-const int FC1 = 9;  //  Yabajo
+const int FC1 = 51;  //  Yabajo
 const int FC2 = 10;  //  Xarriba
-const int FC3 = 11;  // Zdentro
+const int FC3 = 9;  // Zdentro
 
 void setup() {
   // Inicializar comunicación serial
